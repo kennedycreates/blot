@@ -1,0 +1,58 @@
+{
+  "format_name": "watercolor.workspace",
+  "format_version": "0.1",
+  "workspace_id": "wcw_multiple",
+  "workspace_name": "Multiple Palettes",
+  "palettes": [
+    {
+      "palette_id": "wcp_focus",
+      "name": "Focus",
+      "description": null,
+      "color": "#20b26b",
+      "object_ids": ["wco_task"]
+    },
+    {
+      "palette_id": "wcp_archive",
+      "name": "Archive",
+      "description": "Inactive reference material",
+      "color": null,
+      "object_ids": ["wco_note"]
+    }
+  ],
+  "objects": [
+    {
+      "object_id": "wco_task",
+      "object_type": "task",
+      "title": "Ship parser",
+      "summary": null,
+      "app_origin": "terroirctl",
+      "file_refs": []
+    },
+    {
+      "object_id": "wco_note",
+      "object_type": "note",
+      "title": "Parser Notes",
+      "summary": "Design notes for the v0.1 parser",
+      "app_origin": null,
+      "file_refs": ["docs/parser-notes.md"]
+    }
+  ],
+  "relationships": [
+    {
+      "relationship_id": "wcr_task_note",
+      "source_object_id": "wco_task",
+      "target_kind": "object",
+      "target_object_id": "wco_note",
+      "target_path": null,
+      "relationship_type": "explained_by"
+    },
+    {
+      "relationship_id": "wcr_task_path",
+      "source_object_id": "wco_task",
+      "target_kind": "path",
+      "target_object_id": null,
+      "target_path": "src/water_file.rs",
+      "relationship_type": "implemented_in"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Blot
+Comment=Local-first notes and workspace editor
+Exec=blot %F
+Icon=blot
+Terminal=false
+Type=Application
+Categories=Office;TextEditor;
+MimeType=application/x-watercolor-workspace;
+StartupNotify=true
+StartupWMClass=Blot
+Keywords=notes;writing;text;workspace;watercolor;

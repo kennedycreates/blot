@@ -1,0 +1,9 @@
+pub mod command_palette;
+pub mod desk_shell;
+pub mod editor_shell;
+pub mod main_window;
+pub mod place_note_dialog;
+pub mod room_map_shell;
+pub mod search_shell;
+pub mod water_workspace_shell;
+pub mod workspace_shell;
