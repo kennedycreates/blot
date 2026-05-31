@@ -4,6 +4,8 @@ mod document;
 mod inbox;
 mod known_workspaces;
 mod launch;
+mod note_version;
+mod ops;
 mod paths;
 mod place_note;
 mod search;

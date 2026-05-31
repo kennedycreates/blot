@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 pub fn on_activate(app: &Application, launch: &LaunchMode) {
-    let paths = AppPaths::resolve();
+    let paths = Rc::new(AppPaths::resolve());
     paths.ensure_dirs();
 
-    let config = AppConfig::load(&paths);
+    let config = Rc::new(AppConfig::load(&paths));
     load_css(&config.theme, &paths);
 
     if cfg!(debug_assertions) {
@@ -35,9 +35,25 @@ pub fn on_activate(app: &Application, launch: &LaunchMode) {
         }
     };
 
-    let window = MainWindow::new(app, launch.config(), &config, &paths, db);
+    let window = MainWindow::new(app, launch.config(), config, paths, db);
     setup_icon(&window);
     window.present();
+}
+
+/// Open a fresh Blot window sharing the same Inbox database.
+/// Call this to implement "Open in New Window".
+pub fn open_new_window(
+    app: &Application,
+    db: Rc<RefCell<Option<InboxDb>>>,
+    config: Rc<AppConfig>,
+    paths: Rc<AppPaths>,
+) -> ApplicationWindow {
+    use crate::launch::LaunchConfig;
+    let launch = LaunchConfig::default();
+    let window = MainWindow::new(app, &launch, config, paths, db);
+    setup_icon(&window);
+    window.present();
+    window
 }
 
 fn load_css(theme: &str, paths: &AppPaths) {

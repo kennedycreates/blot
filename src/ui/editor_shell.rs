@@ -11,6 +11,9 @@ const AUTOSAVE_DELAY_MS: u64 = 1_500;
 
 // ── EditorWidgets ─────────────────────────────────────────────────────────────
 
+/// Deferred single-arg callback type used for split/bookmark/history/merge buttons.
+pub type DeferredCb<A> = Rc<RefCell<Option<Box<dyn Fn(A)>>>>;
+
 /// Handles to the live GTK widgets that make up the editor surface.
 /// Clone is cheap — all inner types are reference-counted.
 #[derive(Clone)]
@@ -25,6 +28,14 @@ pub struct EditorWidgets {
     pub source_btn: gtk::ToggleButton,
     /// Button that opens the Place Note dialog. Insensitive until the note is saved.
     pub place_btn: gtk::Button,
+    /// Button that splits selected text into a new note.
+    pub split_btn: gtk::Button,
+    /// Button that creates a named bookmark of the current state.
+    pub bookmark_btn: gtk::Button,
+    /// Button that opens the version history dialog.
+    pub history_btn: gtk::Button,
+    /// Button that opens the merge dialog.
+    pub merge_btn: gtk::Button,
     /// True when source-view mode is active.
     pub source_mode: Rc<Cell<bool>>,
     /// Pending autosave timer handle.
@@ -34,6 +45,17 @@ pub struct EditorWidgets {
     pub title_auto_flag: Rc<Cell<bool>>,
     /// Set while loading note content from DB (suppresses autosave).
     pub loading_flag: Rc<Cell<bool>>,
+    /// Called after each successful save with (note_id, title).
+    /// Used by the tab bar to keep tab titles and IDs in sync.
+    pub on_note_saved: Rc<dyn Fn(String, String)>,
+    /// Deferred: called with note_id when Split Note is activated.
+    pub on_split: DeferredCb<String>,
+    /// Deferred: called with note_id when Bookmark is activated.
+    pub on_bookmark: DeferredCb<String>,
+    /// Deferred: called with note_id when Show History is activated.
+    pub on_history: DeferredCb<String>,
+    /// Deferred: called with note_id when Merge is activated.
+    pub on_merge: DeferredCb<String>,
 }
 
 impl EditorWidgets {
@@ -77,6 +99,10 @@ impl EditorWidgets {
 
         self.save_label.set_text("Opened");
         self.place_btn.set_sensitive(true);
+        self.split_btn.set_sensitive(true);
+        self.bookmark_btn.set_sensitive(true);
+        self.history_btn.set_sensitive(true);
+        self.merge_btn.set_sensitive(true);
     }
 
     /// Clear the editor for a brand-new blank note.
@@ -102,7 +128,18 @@ impl EditorWidgets {
         session.borrow_mut().reset();
         self.save_label.set_text("New note");
         self.place_btn.set_sensitive(false);
+        self.split_btn.set_sensitive(false);
+        self.bookmark_btn.set_sensitive(false);
+        self.history_btn.set_sensitive(false);
+        self.merge_btn.set_sensitive(false);
         self.body_view.grab_focus();
+    }
+
+    fn enable_action_buttons(&self, enabled: bool) {
+        self.split_btn.set_sensitive(enabled);
+        self.bookmark_btn.set_sensitive(enabled);
+        self.history_btn.set_sensitive(enabled);
+        self.merge_btn.set_sensitive(enabled);
     }
 
     /// Save immediately, bypassing the debounce timer.
@@ -124,18 +161,28 @@ impl EditorWidgets {
             &self.pending_timer,
             &self.title_auto_flag,
         );
+        // Notify tab bar of the saved note identity.
+        if let Some(nid) = session.borrow().note_id.clone() {
+            let title = self.title_entry.text().to_string();
+            (self.on_note_saved)(nid, title);
+        }
     }
 }
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
 /// Construct the Editor Mode surface and wire up autosave + source toggle.
+///
+/// `on_note_saved(note_id, title)` is called after every successful autosave so
+/// the tab bar can keep its title and ID in sync.
 pub fn build(
     db: Rc<RefCell<Option<InboxDb>>>,
     session: Rc<RefCell<NoteSession>>,
     save_label: gtk::Label,
     on_place_note: impl Fn(String, String) + 'static,
+    on_note_saved: impl Fn(String, String) + 'static,
 ) -> EditorWidgets {
+    let on_note_saved: Rc<dyn Fn(String, String)> = Rc::new(on_note_saved);
     // ── Shared state ──────────────────────────────────────────────────────
     let pending_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let title_auto_flag: Rc<Cell<bool>> = Rc::new(Cell::new(false));
@@ -172,11 +219,35 @@ pub fn build(
     place_btn.set_tooltip_text(Some("Move this note into a workspace (Ctrl+Shift+P)"));
     place_btn.set_sensitive(false);
 
+    let split_btn = gtk::Button::with_label("Split");
+    split_btn.add_css_class("editor-action-btn");
+    split_btn.set_tooltip_text(Some("Split selected text into a new note"));
+    split_btn.set_sensitive(false);
+
+    let bookmark_btn = gtk::Button::with_label("Bookmark");
+    bookmark_btn.add_css_class("editor-action-btn");
+    bookmark_btn.set_tooltip_text(Some("Save a named bookmark of the current state"));
+    bookmark_btn.set_sensitive(false);
+
+    let history_btn = gtk::Button::with_label("History");
+    history_btn.add_css_class("editor-action-btn");
+    history_btn.set_tooltip_text(Some("View version history for this note"));
+    history_btn.set_sensitive(false);
+
+    let merge_btn = gtk::Button::with_label("Merge…");
+    merge_btn.add_css_class("editor-action-btn");
+    merge_btn.set_tooltip_text(Some("Merge other notes into this one"));
+    merge_btn.set_sensitive(false);
+
     let source_btn = gtk::ToggleButton::with_label("Source");
     source_btn.add_css_class("source-toggle-btn");
     source_btn.set_tooltip_text(Some("Toggle raw Markdown source view"));
 
     toolbar_row.append(&breadcrumb);
+    toolbar_row.append(&split_btn);
+    toolbar_row.append(&bookmark_btn);
+    toolbar_row.append(&history_btn);
+    toolbar_row.append(&merge_btn);
     toolbar_row.append(&place_btn);
     toolbar_row.append(&source_btn);
 
@@ -211,6 +282,11 @@ pub fn build(
     outer.append(&hint_label);
     scrolled.set_child(Some(&outer));
 
+    let on_split: DeferredCb<String> = Rc::new(RefCell::new(None));
+    let on_bookmark: DeferredCb<String> = Rc::new(RefCell::new(None));
+    let on_history: DeferredCb<String> = Rc::new(RefCell::new(None));
+    let on_merge: DeferredCb<String> = Rc::new(RefCell::new(None));
+
     let widgets = EditorWidgets {
         root: scrolled,
         title_entry: title_entry.clone(),
@@ -218,10 +294,19 @@ pub fn build(
         save_label: save_label.clone(),
         source_btn: source_btn.clone(),
         place_btn: place_btn.clone(),
+        split_btn: split_btn.clone(),
+        bookmark_btn: bookmark_btn.clone(),
+        history_btn: history_btn.clone(),
+        merge_btn: merge_btn.clone(),
         source_mode: source_mode.clone(),
         pending_timer: pending_timer.clone(),
         title_auto_flag: title_auto_flag.clone(),
         loading_flag: loading_flag.clone(),
+        on_note_saved: on_note_saved.clone(),
+        on_split: on_split.clone(),
+        on_bookmark: on_bookmark.clone(),
+        on_history: on_history.clone(),
+        on_merge: on_merge.clone(),
     };
 
     // ── Place Note button ─────────────────────────────────────────────────────
@@ -233,6 +318,52 @@ pub fn build(
             if let Some(note_id) = note_id {
                 let title = title_entry.text().to_string();
                 on_place_note(note_id, title);
+            }
+        });
+    }
+
+    // ── Note action buttons (Split / Bookmark / History / Merge) ─────────
+    {
+        let session = session.clone();
+        let cb = on_split.clone();
+        split_btn.connect_clicked(move |_| {
+            if let Some(nid) = session.borrow().note_id.clone() {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        });
+    }
+    {
+        let session = session.clone();
+        let cb = on_bookmark.clone();
+        bookmark_btn.connect_clicked(move |_| {
+            if let Some(nid) = session.borrow().note_id.clone() {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        });
+    }
+    {
+        let session = session.clone();
+        let cb = on_history.clone();
+        history_btn.connect_clicked(move |_| {
+            if let Some(nid) = session.borrow().note_id.clone() {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        });
+    }
+    {
+        let session = session.clone();
+        let cb = on_merge.clone();
+        merge_btn.connect_clicked(move |_| {
+            if let Some(nid) = session.borrow().note_id.clone() {
+                if let Some(f) = cb.borrow().as_ref() {
+                    f(nid);
+                }
             }
         });
     }
@@ -309,9 +440,14 @@ pub fn build(
             let label2 = save_label.clone();
             let timer2 = pending_timer.clone();
             let flag2 = title_auto_flag.clone();
+            let on_saved2 = on_note_saved.clone();
 
             let id = glib::timeout_add_local(Duration::from_millis(AUTOSAVE_DELAY_MS), move || {
                 perform_save(&body2, &title2, &label2, &db2, &session2, &timer2, &flag2);
+                // Notify tab bar after successful save.
+                if let Some(nid) = session2.borrow().note_id.clone() {
+                    on_saved2(nid, title2.text().to_string());
+                }
                 glib::ControlFlow::Break
             });
             *pending_timer.borrow_mut() = Some(id);

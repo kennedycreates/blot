@@ -1,4 +1,4 @@
-# Blot Data Model — v0.4 (Prompt 7)
+# Blot Data Model — v0.5 (Prompt 8)
 
 This document describes the data entities and storage model for Blot.
 
@@ -241,8 +241,15 @@ Proposed Blot additions to `notes`:
 |--------|------|-------|
 | `word_count` | INTEGER | Approximate word count. |
 | `auto_titled` | INTEGER (BOOL) | 1 if title was auto-derived. |
-| `is_archived` | INTEGER (BOOL) | 1 if note was archived by merge or replace. Archived notes are not shown in normal lists. |
+| `is_archived` | INTEGER (BOOL) | 1 if note was archived by merge or replace. Archived notes are not shown in normal lists or search. |
 | `redirects_to_note_id` | TEXT | If archived, the note this was merged into. |
+| `merged_into_note_id` | TEXT | Prompt 10: target note ID a merged source was folded into (nullable). |
+| `merged_at` | TEXT | Prompt 10: ISO 8601 time the source was archived by a merge (nullable). |
+
+Inbox notes (`inbox_notes`) carry the equivalent merge-tracking columns
+`merged_into_kind`, `merged_into_id`, `merged_into_workspace_path`, and
+`merged_at`, since an Inbox note may be merged into either another Inbox note
+or a workspace note.
 
 ---
 
@@ -312,15 +319,24 @@ One row per note. A note lives in exactly one location at a time.
 | `name` | TEXT | User-editable room name. |
 | `description` | TEXT | Optional. |
 | `atmosphere_json` | TEXT | JSON: `{background_tint, accent_color, header_style, decorative_hints}`. All nullable. |
-| `map_x` | REAL | X position on the Room Map canvas. |
+| `map_x` | REAL | X position on the Room Map canvas (0.0 = not yet positioned; auto-laid out by Room Map). |
 | `map_y` | REAL | Y position on the Room Map canvas. |
-| `map_width` | REAL | Visual size hint for Room Map. |
-| `map_height` | REAL | Visual size hint for Room Map. |
+| `map_width` | REAL | Visual size hint for Room Map (reserved for future use). |
+| `map_height` | REAL | Visual size hint for Room Map (reserved for future use). |
 | `sort_position` | REAL | Float ordering key for sidebar list. |
-| `created_at` | INTEGER | Unix timestamp. |
-| `updated_at` | INTEGER | Unix timestamp. |
+| `created_at` | TEXT | ISO 8601. |
+| `updated_at` | TEXT | ISO 8601. Updated when the room is renamed or its map position changes. |
 
-Every workspace gets one Room on creation. The room is named "Room" (or similar default) and is immediately renamable.
+Every workspace gets one Room on creation. The room is named "Main Room" and is immediately renamable.
+
+**Room Map position:** `map_x`/`map_y` start at `0.0`. When Room Map Mode opens, if all rooms are at (0, 0), automatic circular layout is applied in memory. Positions are persisted to the DB when the user drags a room card.
+
+**Implemented in `WorkspaceDb` (Prompt 8):**
+- `list_rooms()` — includes `map_x`, `map_y`
+- `get_room(id)` — includes `map_x`, `map_y`
+- `update_room_map_position(room_id, x, y)`
+- `room_total_note_count(room_id)` — loose + shelved/piled notes
+- `room_container_count(room_id)` — shelves + piles
 
 ---
 
@@ -330,14 +346,26 @@ Doors between rooms.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | TEXT (UUID) | Primary key. |
-| `room_a_id` | TEXT | FK → `blot_rooms.id`. |
+| `id` | TEXT | Primary key. |
+| `room_a_id` | TEXT | FK → `blot_rooms.id`. Always the lexicographically smaller ID. |
 | `room_b_id` | TEXT | FK → `blot_rooms.id`. |
-| `connection_type` | TEXT | `normal`, `strong`, or `weak`. |
-| `label` | TEXT | Optional. Unlabeled by default. |
-| `created_at` | INTEGER | Unix timestamp. |
+| `connection_type` | TEXT | `normal`, `strong`, or `weak`. Validated on write. |
+| `label` | TEXT | Optional, unlabeled by default. |
+| `created_at` | TEXT | ISO 8601. |
 
-Connections are undirected: `(room_a, room_b)` and `(room_b, room_a)` are the same connection. Enforce uniqueness by always storing `room_a_id < room_b_id` alphabetically (or use a unique constraint on both orderings).
+Connections are **undirected**: `(room_a, room_b)` and `(room_b, room_a)` are the same connection. The application always stores `room_a_id ≤ room_b_id` lexicographically. A `UNIQUE(room_a_id, room_b_id)` constraint prevents duplicates at the DB level; the application also returns the existing connection rather than inserting a duplicate.
+
+**Rules (enforced in `WorkspaceDb`):**
+- Self-connections (both IDs the same) are rejected with `WorkspaceError::Invalid`.
+- Invalid connection types (anything other than `normal`, `strong`, `weak`) are rejected.
+- Duplicate connections return the existing row.
+
+**Implemented in `WorkspaceDb` (Prompt 8):**
+- `create_room_connection(a, b, type)` — validates, prevents self-loop and duplicates
+- `list_room_connections()` — all connections
+- `list_connections_for_room(room_id)` — connections touching a specific room (either end)
+- `delete_room_connection(id)` — safe delete, does not touch rooms or notes
+- `update_room_connection_type(id, type)` — validated update
 
 ---
 
@@ -360,20 +388,35 @@ Converting a Pile to a Shelf updates `kind = 'shelf'`. This is a meaningful user
 
 ---
 
-### `note_bookmarks`
+### `note_versions` (workspace) / `inbox_note_versions` (Inbox)  — Prompt 10
 
-Named snapshots of a note's content.
+Point-in-time snapshots of a note's content. The same shape exists in both
+the `.water` workspace (`note_versions`, FK → `notes.id`) and the Inbox DB
+(`inbox_note_versions`, FK → `inbox_notes.id`). A **Bookmark** is simply a
+version row with `is_bookmark = 1`.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | TEXT (UUID) | Primary key. |
-| `note_id` | TEXT | FK → `notes.id`. |
-| `label` | TEXT | User-provided or auto-generated (`Auto before Split`, `Auto before Merge`, etc.). |
-| `is_auto` | INTEGER (BOOL) | 1 if auto-created by Blot, 0 if user-created. |
-| `snapshot_json` | TEXT | Full JSON snapshot of `note_blocks` at the time of bookmark. |
-| `created_at` | INTEGER | Unix timestamp. |
+| `id` | TEXT | Primary key. |
+| `note_id` | TEXT | FK → the owning note. |
+| `title` | TEXT | Snapshot of the note title. |
+| `body` | TEXT | Snapshot of the note body. |
+| `document_json` | TEXT | Snapshot of the structured document JSON (nullable). |
+| `created_at` | TEXT | ISO 8601 timestamp. |
+| `reason` | TEXT | Why the version was made (`manual bookmark`, `before split`, `before merge (target)`, `before merge (source)`, `before restore`). |
+| `is_bookmark` | INTEGER (BOOL) | 1 if this version is a named/important bookmark. |
+| `bookmark_name` | TEXT | User-supplied or default `Bookmarked <timestamp>` name (nullable). |
+| `bookmark_kind` | TEXT | `manual`, `auto`, or `system`. |
+| `operation_id` | TEXT | Groups versions created by a single operation, e.g. all bookmarks made before one Merge (nullable). |
 
-Bookmarks are append-only. Deleting a bookmark removes the snapshot permanently (confirm first).
+**Storage rules:** versions are *not* created per keystroke — autosave is
+separate. Versions are created when the user bookmarks, and automatically
+("auto-bookmarks") before each risky operation (Split, Merge, Restore, and
+Compare-Mode content moves). Versions are append-only.
+
+**Restore safety:** restoring a version first auto-bookmarks the current state
+(`reason = "before restore"`), then overwrites title/body/document_json with
+the snapshot and autosaves. Current content is never destroyed.
 
 ---
 

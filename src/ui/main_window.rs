@@ -3,11 +3,16 @@ use crate::inbox::{InboxDb, NoteSession};
 use crate::known_workspaces::{KnownWorkspace, KnownWorkspaceRegistry};
 use crate::launch::LaunchConfig;
 use crate::paths::AppPaths;
+use crate::ui::compare_shell::CompareShell;
 use crate::ui::desk_shell::DeskShell;
+use crate::ui::room_map_shell::RoomMapShell;
 use crate::ui::search_shell::{SearchNoteTarget, SearchShell};
+use crate::ui::tab_bar::{NoteSource, TabBar, TabModel};
 use crate::ui::water_workspace_shell::WaterWorkspaceShell;
 use crate::ui::workspace_shell::WorkspaceShell;
-use crate::ui::{command_palette, editor_shell, place_note_dialog, room_map_shell};
+use crate::ui::{
+    command_palette, editor_shell, merge_dialog, place_note_dialog, version_history_shell,
+};
 use crate::workspace::{now_iso8601, WorkspaceDb, WorkspaceNoteSession};
 use gio::prelude::*;
 use gtk::prelude::*;
@@ -21,8 +26,8 @@ impl MainWindow {
     pub fn new(
         app: &Application,
         launch: &LaunchConfig,
-        _config: &AppConfig,
-        paths: &AppPaths,
+        config: Rc<AppConfig>,
+        paths: Rc<AppPaths>,
         db: Rc<RefCell<Option<InboxDb>>>,
     ) -> ApplicationWindow {
         let window = ApplicationWindow::builder()
@@ -44,6 +49,9 @@ impl MainWindow {
         let known_ws: Rc<RefCell<KnownWorkspaceRegistry>> = Rc::new(RefCell::new(
             KnownWorkspaceRegistry::load(&paths.known_workspaces),
         ));
+
+        // ── Tab model ──────────────────────────────────────────────────────
+        let tab_model: Rc<RefCell<TabModel>> = Rc::new(RefCell::new(TabModel::new()));
 
         // ── Status bar ─────────────────────────────────────────────────────
         let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -81,8 +89,12 @@ impl MainWindow {
         // editor can be built now and the callback installed later.
         let deferred_place: std::rc::Rc<std::cell::RefCell<Option<Box<dyn Fn(String, String)>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
+        // Deferred tab-update callback — installed after tab_bar is built.
+        let deferred_note_saved: Rc<RefCell<Option<Box<dyn Fn(String, String)>>>> =
+            Rc::new(RefCell::new(None));
         let editor = {
             let deferred = deferred_place.clone();
+            let deferred_saved = deferred_note_saved.clone();
             editor_shell::build(
                 db.clone(),
                 session.clone(),
@@ -90,6 +102,11 @@ impl MainWindow {
                 move |id, title| {
                     if let Some(f) = deferred.borrow().as_ref() {
                         f(id, title);
+                    }
+                },
+                move |note_id, title| {
+                    if let Some(f) = deferred_saved.borrow().as_ref() {
+                        f(note_id, title);
                     }
                 },
             )
@@ -304,15 +321,35 @@ impl MainWindow {
             )
         };
 
-        // ── Room Map placeholder ───────────────────────────────────────────
-        let room_map = room_map_shell::build();
+        // ── Room Map shell ─────────────────────────────────────────────────
+        let room_map_shell = {
+            let ws_shell_nav = ws_shell.clone();
+            let stack_nav = stack.clone();
+            let mode_nav = mode_label.clone();
+            RoomMapShell::new(workspace_db.clone(), move |room_id| {
+                ws_shell_nav.navigate_to_room(&room_id);
+                stack_nav.set_visible_child_name("workspace");
+                mode_nav.set_text("Workspace");
+            })
+        };
+
+        // ── Compare shell ──────────────────────────────────────────────────
+        let compare_shell = {
+            let stack_exit = stack.clone();
+            let mode_exit = mode_label.clone();
+            CompareShell::new(db.clone(), workspace_db.clone(), move || {
+                stack_exit.set_visible_child_name("editor");
+                mode_exit.set_text("Editor");
+            })
+        };
 
         stack.add_named(&editor.root, Some("editor"));
         stack.add_named(&desk.root, Some("desk"));
         stack.add_named(&ws_shell.root, Some("workspace"));
         stack.add_named(&water_shell.root, Some("water-workspace"));
         stack.add_named(&search_shell.root, Some("search"));
-        stack.add_named(&room_map, Some("room-map"));
+        stack.add_named(&room_map_shell.root, Some("room-map"));
+        stack.add_named(&compare_shell.root, Some("compare"));
 
         // ── Place Note shared callback ──────────────────────────────────────
         // Installed here (after window/stack/ws_shell/editor are all live).
@@ -370,6 +407,287 @@ impl MainWindow {
                 }));
         }
 
+        // ── Tab bar ────────────────────────────────────────────────────────
+        // Create an initial blank Inbox tab so the startup editor is tab-aware.
+        tab_model.borrow_mut().new_blank(NoteSource::Inbox);
+
+        let tab_bar = {
+            let model_sw = tab_model.clone();
+            let model_cl = tab_model.clone();
+            let model_nw = tab_model.clone();
+
+            let editor_sw = editor.clone();
+            let session_sw = session.clone();
+            let db_sw = db.clone();
+            let ws_shell_sw = ws_shell.clone();
+            let stack_sw = stack.clone();
+            let mode_sw = mode_label.clone();
+
+            let editor_cl = editor.clone();
+            let session_cl = session.clone();
+            let db_cl = db.clone();
+            let ws_shell_cl = ws_shell.clone();
+            let stack_cl = stack.clone();
+            let mode_cl = mode_label.clone();
+
+            let editor_nw = editor.clone();
+            let session_nw = session.clone();
+            let db_nw = db.clone();
+            let stack_nw = stack.clone();
+            let mode_nw = mode_label.clone();
+
+            // We need the tab_bar Rc for refresh inside closures — create it up front.
+            let tab_bar_rc: Rc<RefCell<Option<TabBar>>> = Rc::new(RefCell::new(None));
+            let tb_for_sw = tab_bar_rc.clone();
+            let tb_for_cl = tab_bar_rc.clone();
+            let tb_for_nw = tab_bar_rc.clone();
+
+            let on_switch = move |tab_id: String| {
+                switch_to_tab(
+                    &tab_id,
+                    &model_sw,
+                    &editor_sw,
+                    &ws_shell_sw,
+                    &session_sw,
+                    &db_sw,
+                    &stack_sw,
+                    &mode_sw,
+                );
+                if let Some(tb) = tb_for_sw.borrow().as_ref() {
+                    tb.refresh();
+                }
+            };
+
+            let on_close = move |tab_id: String| {
+                // Save the note before closing.
+                let tab = model_cl.borrow().find_source_by_tab_id(&tab_id);
+                if let Some(src) = tab {
+                    match src {
+                        NoteSource::Inbox => {
+                            editor_cl.force_save_sync(&db_cl, &session_cl);
+                        }
+                        NoteSource::Workspace(_) => {
+                            ws_shell_cl.force_save_sync();
+                        }
+                    }
+                }
+                let was_active = model_cl
+                    .borrow()
+                    .active_tab()
+                    .map(|t| t.tab_id == tab_id)
+                    .unwrap_or(false);
+                model_cl.borrow_mut().close(&tab_id);
+                // If we closed the active tab, load the new active tab.
+                if was_active {
+                    let new_active = model_cl.borrow().active_tab().map(|t| t.tab_id.clone());
+                    if let Some(new_id) = new_active {
+                        switch_to_tab(
+                            &new_id,
+                            &model_cl,
+                            &editor_cl,
+                            &ws_shell_cl,
+                            &session_cl,
+                            &db_cl,
+                            &stack_cl,
+                            &mode_cl,
+                        );
+                    }
+                }
+                if let Some(tb) = tb_for_cl.borrow().as_ref() {
+                    tb.refresh();
+                }
+            };
+
+            let on_new = move || {
+                editor_nw.force_save_sync(&db_nw, &session_nw);
+                editor_nw.new_note(&session_nw);
+                let tab_id = model_nw.borrow_mut().new_blank(NoteSource::Inbox);
+                stack_nw.set_visible_child_name("editor");
+                mode_nw.set_text("Editor");
+                if let Some(tb) = tb_for_nw.borrow().as_ref() {
+                    tb.refresh();
+                }
+                let _ = tab_id;
+            };
+
+            let bar = TabBar::new(tab_model.clone(), on_switch, on_close, on_new);
+            *tab_bar_rc.borrow_mut() = Some(bar.clone());
+            (bar, tab_bar_rc)
+        };
+        let (tab_bar_widget, tab_bar_rc) = tab_bar;
+
+        // Install the deferred on_note_saved callback now that tab_bar_widget exists.
+        {
+            let model = tab_model.clone();
+            let bar = tab_bar_widget.clone();
+            *deferred_note_saved.borrow_mut() =
+                Some(Box::new(move |note_id: String, title: String| {
+                    let mut m = model.borrow_mut();
+                    m.update_active_note_id(&note_id);
+                    m.update_active_title(&title);
+                    drop(m);
+                    bar.refresh();
+                }));
+        }
+
+        // ── Editor action button callbacks ─────────────────────────────────
+
+        // Split Note
+        {
+            let db2 = db.clone();
+            let editor2 = editor.clone();
+            let session2 = session.clone();
+            let window2 = window.clone();
+            *editor.on_split.borrow_mut() = Some(Box::new(move |note_id: String| {
+                // Get selected text from the editor body view.
+                let buf = editor2.body_view.buffer();
+                let selected = if let Some((start, end)) = buf.selection_bounds() {
+                    buf.text(&start, &end, false).to_string()
+                } else {
+                    String::new()
+                };
+                if selected.trim().is_empty() {
+                    eprintln!("blot: Split Note — select text first");
+                    return;
+                }
+                let note_opt = db2
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.get_note(&note_id).ok().flatten());
+                let Some(note) = note_opt else { return };
+                let db3 = db2.clone();
+                let editor3 = editor2.clone();
+                let session3 = session2.clone();
+                let split_result = {
+                    let guard = db3.borrow();
+                    guard
+                        .as_ref()
+                        .map(|d| crate::ops::split_inbox_note(d, &note, &selected))
+                };
+                if let Some(outcome) = split_result {
+                    match outcome {
+                        Ok(result) => {
+                            // Update original note body in the editor.
+                            let loading = editor3.loading_flag.clone();
+                            loading.set(true);
+                            editor3
+                                .body_view
+                                .buffer()
+                                .set_text(&result.updated_original_body);
+                            loading.set(false);
+                            // Force-save the updated original.
+                            editor3.force_save_sync(&db3, &session3);
+                            eprintln!(
+                                "blot: Split Note → new note '{}' created",
+                                result.new_note.title
+                            );
+                            let _ = &window2;
+                        }
+                        Err(e) => eprintln!("blot: split error: {e}"),
+                    }
+                }
+            }));
+        }
+
+        // Bookmark Version
+        {
+            let db2 = db.clone();
+            let window2 = window.clone();
+            *editor.on_bookmark.borrow_mut() = Some(Box::new(move |note_id: String| {
+                let db3 = db2.clone();
+                let note_opt = db3
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.get_note(&note_id).ok().flatten());
+                let Some(note) = note_opt else { return };
+                version_history_shell::prompt_bookmark_name(&window2, move |name| {
+                    if let Some(d) = db3.borrow().as_ref() {
+                        match d.create_version(
+                            &note,
+                            "manual bookmark",
+                            true,
+                            Some(&name),
+                            Some("manual"),
+                            None,
+                        ) {
+                            Ok(_) => eprintln!("blot: Bookmarked version '{name}'"),
+                            Err(e) => eprintln!("blot: bookmark error: {e}"),
+                        }
+                    }
+                });
+            }));
+        }
+
+        // Show Version History
+        {
+            let db2 = db.clone();
+            let editor2 = editor.clone();
+            let session2 = session.clone();
+            let window2 = window.clone();
+            *editor.on_history.borrow_mut() = Some(Box::new(move |note_id: String| {
+                let db3 = db2.clone();
+                let editor3 = editor2.clone();
+                let session3 = session2.clone();
+                version_history_shell::open_inbox(
+                    &window2,
+                    db3.clone(),
+                    &note_id,
+                    move |restored| {
+                        editor3.load_note(&restored, &session3);
+                        eprintln!("blot: Version restored");
+                    },
+                );
+            }));
+        }
+
+        // Merge Notes
+        {
+            let db2 = db.clone();
+            let editor2 = editor.clone();
+            let session2 = session.clone();
+            let window2 = window.clone();
+            *editor.on_merge.borrow_mut() = Some(Box::new(move |note_id: String| {
+                let db3 = db2.clone();
+                let editor3 = editor2.clone();
+                let session3 = session2.clone();
+                let target_id = note_id.clone();
+                merge_dialog::open_inbox(&window2, db3.clone(), &note_id, move |source_ids| {
+                    let target_opt = db3
+                        .borrow()
+                        .as_ref()
+                        .and_then(|d| d.get_note(&target_id).ok().flatten());
+                    let Some(target) = target_opt else { return };
+                    let sources: Vec<crate::inbox::InboxNote> = source_ids
+                        .iter()
+                        .filter_map(|id| {
+                            db3.borrow()
+                                .as_ref()
+                                .and_then(|d| d.get_note(id).ok().flatten())
+                        })
+                        .collect();
+                    let source_refs: Vec<&crate::inbox::InboxNote> = sources.iter().collect();
+                    let op_id = crate::inbox::new_note_id();
+                    if let Some(d) = db3.borrow().as_ref() {
+                        match crate::ops::merge_inbox_notes(d, &target, &source_refs, &op_id) {
+                            Ok(merged_body) => {
+                                // Update editor with merged body.
+                                let loading = editor3.loading_flag.clone();
+                                loading.set(true);
+                                editor3.body_view.buffer().set_text(&merged_body);
+                                loading.set(false);
+                                editor3.force_save_sync(&db3, &session3);
+                                eprintln!("blot: Merged {} notes into current", sources.len());
+                            }
+                            Err(e) => eprintln!("blot: merge error: {e}"),
+                        }
+                    }
+                });
+            }));
+        }
+
+        // Initial tab bar render.
+        tab_bar_widget.refresh();
+
         // ── Header bar ─────────────────────────────────────────────────────
         let header = gtk::HeaderBar::new();
         header.add_css_class("blot-header");
@@ -394,10 +712,15 @@ impl MainWindow {
         workspace_btn.add_css_class("mode-button");
         workspace_btn.set_tooltip_text(Some("Switch to focused workspace (Ctrl+W)"));
 
+        let compare_btn = gtk::Button::with_label("Compare");
+        compare_btn.add_css_class("mode-button");
+        compare_btn.set_tooltip_text(Some("Compare two notes side by side"));
+
         nav_box.append(&desk_btn);
         nav_box.append(&search_btn);
         nav_box.append(&room_map_btn);
         nav_box.append(&workspace_btn);
+        nav_box.append(&compare_btn);
         header.pack_start(&nav_box);
 
         let palette_btn = gtk::Button::with_label("Commands");
@@ -410,6 +733,7 @@ impl MainWindow {
 
         // ── Root layout ────────────────────────────────────────────────────
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&tab_bar_widget.root);
         root.append(&stack);
         root.append(&status_bar);
         window.set_child(Some(&root));
@@ -441,7 +765,9 @@ impl MainWindow {
         {
             let stack = stack.clone();
             let mode_label = mode_label.clone();
+            let rm_shell = room_map_shell.clone();
             room_map_btn.connect_clicked(move |_| {
+                rm_shell.refresh();
                 stack.set_visible_child_name("room-map");
                 mode_label.set_text("Room Map");
             });
@@ -463,18 +789,45 @@ impl MainWindow {
             });
         }
 
+        {
+            let stack = stack.clone();
+            let mode_label = mode_label.clone();
+            let editor = editor.clone();
+            let session = session.clone();
+            let db = db.clone();
+            let compare_shell2 = compare_shell.clone();
+            compare_btn.connect_clicked(move |_| {
+                // Save current note before entering compare mode.
+                editor.force_save_sync(&db, &session);
+                // Load the current editor note into the left panel if possible.
+                if let Some(note_id) = session.borrow().note_id.clone() {
+                    let note = db
+                        .borrow()
+                        .as_ref()
+                        .and_then(|db| db.get_note(&note_id).ok().flatten());
+                    if let Some(note) = note {
+                        compare_shell2.load_left_inbox(&note);
+                    }
+                }
+                stack.set_visible_child_name("compare");
+                mode_label.set_text("Compare");
+            });
+        }
+
         // Refresh mode surfaces when they become visible.
         {
             let desk = desk.clone();
             let ws_shell2 = ws_shell.clone();
             let water_shell2 = water_shell.clone();
             let search_shell3 = search_shell.clone();
+            let rm_shell2 = room_map_shell.clone();
             stack.connect_notify_local(Some("visible-child-name"), move |s, _| {
                 match s.visible_child_name().as_deref() {
                     Some("desk") => desk.refresh(),
                     Some("workspace") => ws_shell2.refresh(),
                     Some("water-workspace") => water_shell2.refresh(),
                     Some("search") => search_shell3.activate(),
+                    Some("room-map") => rm_shell2.refresh(),
                     _ => {}
                 }
             });
@@ -487,6 +840,21 @@ impl MainWindow {
             let deferred_place_palette = deferred_place.clone();
             let editor_palette = editor.clone();
             let session_palette = session.clone();
+            let rm_shell_palette = room_map_shell.clone();
+            let stack_palette = stack.clone();
+            let mode_palette = mode_label.clone();
+            let gen_editor = editor.clone();
+            let gen_session = session.clone();
+            let gen_db = db.clone();
+            let gen_ws = ws_shell.clone();
+            let gen_stack = stack.clone();
+            let gen_mode = mode_label.clone();
+            let gen_tab_model = tab_model.clone();
+            let gen_tab_bar = tab_bar_widget.clone();
+            let gen_compare = compare_shell.clone();
+            let gen_app = app.clone();
+            let gen_config = config.clone();
+            let gen_paths = paths.clone();
             palette_btn.connect_clicked(move |_| {
                 let on_place: Option<std::rc::Rc<dyn Fn()>> = {
                     let note_id = session_palette.borrow().note_id.clone();
@@ -500,7 +868,29 @@ impl MainWindow {
                         }) as std::rc::Rc<dyn Fn()>
                     })
                 };
-                command_palette::open(&window_ref, &save_ref, on_place);
+                let on_room_map =
+                    make_room_map_cmd_handler(&rm_shell_palette, &stack_palette, &mode_palette);
+                let on_general = make_general_cmd_handler(
+                    &gen_editor,
+                    &gen_session,
+                    &gen_db,
+                    &gen_ws,
+                    &gen_stack,
+                    &gen_mode,
+                    &gen_tab_model,
+                    &gen_tab_bar,
+                    &gen_compare,
+                    &gen_app,
+                    &gen_config,
+                    &gen_paths,
+                );
+                command_palette::open(
+                    &window_ref,
+                    &save_ref,
+                    on_place,
+                    Some(on_room_map),
+                    Some(on_general),
+                );
             });
         }
 
@@ -513,6 +903,21 @@ impl MainWindow {
             let deferred_place_action = deferred_place.clone();
             let editor_action = editor.clone();
             let session_action = session.clone();
+            let rm_shell_action = room_map_shell.clone();
+            let stack_action = stack.clone();
+            let mode_action = mode_label.clone();
+            let gen_editor = editor.clone();
+            let gen_session = session.clone();
+            let gen_db = db.clone();
+            let gen_ws = ws_shell.clone();
+            let gen_stack = stack.clone();
+            let gen_mode = mode_label.clone();
+            let gen_tab_model = tab_model.clone();
+            let gen_tab_bar = tab_bar_widget.clone();
+            let gen_compare = compare_shell.clone();
+            let gen_app = app.clone();
+            let gen_config = config.clone();
+            let gen_paths = paths.clone();
             let action = gio::SimpleAction::new("open-command-palette", None);
             action.connect_activate(move |_, _| {
                 let on_place: Option<std::rc::Rc<dyn Fn()>> = {
@@ -527,7 +932,23 @@ impl MainWindow {
                         }) as std::rc::Rc<dyn Fn()>
                     })
                 };
-                command_palette::open(&w, &lbl, on_place);
+                let on_room_map =
+                    make_room_map_cmd_handler(&rm_shell_action, &stack_action, &mode_action);
+                let on_general = make_general_cmd_handler(
+                    &gen_editor,
+                    &gen_session,
+                    &gen_db,
+                    &gen_ws,
+                    &gen_stack,
+                    &gen_mode,
+                    &gen_tab_model,
+                    &gen_tab_bar,
+                    &gen_compare,
+                    &gen_app,
+                    &gen_config,
+                    &gen_paths,
+                );
+                command_palette::open(&w, &lbl, on_place, Some(on_room_map), Some(on_general));
             });
             window.add_action(&action);
             app.set_accels_for_action("win.open-command-palette", &["<Ctrl><Shift>p"]);
@@ -565,22 +986,26 @@ impl MainWindow {
             app.set_accels_for_action("win.open-desk", &["<Ctrl>d"]);
         }
 
-        // Ctrl+N → new Inbox note
+        // Ctrl+N / Ctrl+T → new Inbox note in a new tab
         {
             let s = stack.clone();
             let m = mode_label.clone();
             let ed = editor.clone();
             let sess = session.clone();
             let db2 = db.clone();
+            let tm = tab_model.clone();
+            let tb = tab_bar_widget.clone();
             let action = gio::SimpleAction::new("new-inbox-note", None);
             action.connect_activate(move |_, _| {
                 ed.force_save_sync(&db2, &sess);
                 ed.new_note(&sess);
+                tm.borrow_mut().new_blank(NoteSource::Inbox);
+                tb.refresh();
                 s.set_visible_child_name("editor");
                 m.set_text("Editor");
             });
             window.add_action(&action);
-            app.set_accels_for_action("win.new-inbox-note", &["<Ctrl>n"]);
+            app.set_accels_for_action("win.new-inbox-note", &["<Ctrl>n", "<Ctrl>t"]);
         }
 
         // Ctrl+W → workspace mode
@@ -619,6 +1044,68 @@ impl MainWindow {
             app.set_accels_for_action("win.new-workspace-note", &["<Ctrl><Shift>n"]);
         }
 
+        // Ctrl+Page Down → next tab
+        {
+            let ed = editor.clone();
+            let sess = session.clone();
+            let db2 = db.clone();
+            let ws2 = ws_shell.clone();
+            let s = stack.clone();
+            let m = mode_label.clone();
+            let tm = tab_model.clone();
+            let tb = tab_bar_widget.clone();
+            let action = gio::SimpleAction::new("next-tab", None);
+            action.connect_activate(move |_, _| {
+                ed.force_save_sync(&db2, &sess);
+                tm.borrow_mut().next_tab();
+                let id = tm.borrow().active_tab().map(|t| t.tab_id.clone());
+                if let Some(id) = id {
+                    switch_to_tab(&id, &tm, &ed, &ws2, &sess, &db2, &s, &m);
+                    tb.refresh();
+                }
+            });
+            window.add_action(&action);
+            app.set_accels_for_action("win.next-tab", &["<Ctrl>Page_Down"]);
+        }
+
+        // Ctrl+Page Up → previous tab
+        {
+            let ed = editor.clone();
+            let sess = session.clone();
+            let db2 = db.clone();
+            let ws2 = ws_shell.clone();
+            let s = stack.clone();
+            let m = mode_label.clone();
+            let tm = tab_model.clone();
+            let tb = tab_bar_widget.clone();
+            let action = gio::SimpleAction::new("prev-tab", None);
+            action.connect_activate(move |_, _| {
+                ed.force_save_sync(&db2, &sess);
+                tm.borrow_mut().prev_tab();
+                let id = tm.borrow().active_tab().map(|t| t.tab_id.clone());
+                if let Some(id) = id {
+                    switch_to_tab(&id, &tm, &ed, &ws2, &sess, &db2, &s, &m);
+                    tb.refresh();
+                }
+            });
+            window.add_action(&action);
+            app.set_accels_for_action("win.prev-tab", &["<Ctrl>Page_Up"]);
+        }
+
+        // Ctrl+Alt+N → new window
+        {
+            let app2 = app.clone();
+            let db2 = db.clone();
+            let config2 = config.clone();
+            let paths2 = paths.clone();
+            let action = gio::SimpleAction::new("new-window", None);
+            action.connect_activate(move |_, _| {
+                crate::app::open_new_window(&app2, db2.clone(), config2.clone(), paths2.clone());
+            });
+            window.add_action(&action);
+            app.set_accels_for_action("win.new-window", &["<Ctrl><Alt>n"]);
+        }
+
         // Escape → back to editor
         {
             let s = stack.clone();
@@ -639,10 +1126,12 @@ impl MainWindow {
             let db = db.clone();
             let ws_shell2 = ws_shell.clone();
             let water_shell2 = water_shell.clone();
+            let compare_shell2 = compare_shell.clone();
             window.connect_close_request(move |_| {
                 editor.force_save_sync(&db, &session);
                 ws_shell2.force_save_sync();
                 water_shell2.force_save_sync();
+                compare_shell2.force_save_both();
                 glib::Propagation::Proceed
             });
         }
@@ -814,6 +1303,55 @@ fn show_new_workspace_dialog(
     );
 }
 
+/// Build the Room Map command handler passed to the command palette.
+/// Handles: Open Room Map, Create Room, Connect Rooms, Open Selected Room,
+/// Change Room Connection Type, Remove Room Connection.
+fn make_room_map_cmd_handler(
+    room_map_shell: &RoomMapShell,
+    stack: &gtk::Stack,
+    mode_label: &gtk::Label,
+) -> std::rc::Rc<dyn Fn(&str)> {
+    let rm = room_map_shell.clone();
+    let s = stack.clone();
+    let m = mode_label.clone();
+    std::rc::Rc::new(move |cmd: &str| {
+        match cmd {
+            "Open Room Map" => {
+                rm.refresh();
+                s.set_visible_child_name("room-map");
+                m.set_text("Room Map");
+            }
+            "Create Room" => {
+                rm.refresh();
+                s.set_visible_child_name("room-map");
+                m.set_text("Room Map");
+                // Trigger the add-room dialog via a tiny button lookup isn't straightforward
+                // from here, so we just navigate and the user can click + Room.
+                eprintln!("blot: Create Room — Room Map opened, click + Room to add");
+            }
+            "Connect Rooms" => {
+                rm.refresh();
+                s.set_visible_child_name("room-map");
+                m.set_text("Room Map");
+                eprintln!("blot: Connect Rooms — Room Map opened, click + Connect to add a Door");
+            }
+            "Open Selected Room" => {
+                // The on_open_room callback inside the shell handles the actual navigation.
+                // Here we just ensure room map is visible so the user can double-click.
+                rm.refresh();
+                s.set_visible_child_name("room-map");
+                m.set_text("Room Map");
+                eprintln!(
+                    "blot: Open Selected Room — double-click a Room card in the map to open it"
+                );
+            }
+            other => {
+                eprintln!("blot: room map command '{other}' — use Room Map UI");
+            }
+        }
+    })
+}
+
 fn show_error_dialog(parent: Option<&gtk::Window>, title: &str, message: &str) {
     let dialog = gtk::AlertDialog::builder()
         .message(title)
@@ -824,6 +1362,189 @@ fn show_error_dialog(parent: Option<&gtk::Window>, title: &str, message: &str) {
         .modal(true)
         .build();
     dialog.choose(parent, None::<&gio::Cancellable>, |_| {});
+}
+
+// ─── Tab switching ────────────────────────────────────────────────────────────
+
+/// Make the given tab active, then load its note into the correct editor surface.
+fn switch_to_tab(
+    tab_id: &str,
+    model: &Rc<RefCell<TabModel>>,
+    editor: &editor_shell::EditorWidgets,
+    ws_shell: &WorkspaceShell,
+    session: &Rc<RefCell<crate::inbox::NoteSession>>,
+    db: &Rc<RefCell<Option<InboxDb>>>,
+    stack: &gtk::Stack,
+    mode_label: &gtk::Label,
+) {
+    model.borrow_mut().set_active_by_id(tab_id);
+    let tab = model.borrow().active_tab().cloned();
+    let Some(tab) = tab else {
+        return;
+    };
+    match tab.source {
+        NoteSource::Inbox => {
+            if let Some(note_id) = tab.note_id.as_deref() {
+                let note = db
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.get_note(note_id).ok().flatten());
+                if let Some(note) = note {
+                    editor.load_note(&note, session);
+                } else {
+                    editor.new_note(session);
+                }
+            } else {
+                editor.new_note(session);
+            }
+            stack.set_visible_child_name("editor");
+            mode_label.set_text("Editor");
+        }
+        NoteSource::Workspace(_) => {
+            if let Some(note_id) = tab.note_id.as_deref() {
+                ws_shell.open_note(note_id);
+            }
+            stack.set_visible_child_name("workspace");
+            mode_label.set_text("Workspace");
+        }
+    }
+}
+
+// ─── General command palette handler ─────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn make_general_cmd_handler(
+    editor: &editor_shell::EditorWidgets,
+    session: &Rc<RefCell<crate::inbox::NoteSession>>,
+    db: &Rc<RefCell<Option<InboxDb>>>,
+    ws_shell: &WorkspaceShell,
+    stack: &gtk::Stack,
+    mode_label: &gtk::Label,
+    tab_model: &Rc<RefCell<TabModel>>,
+    tab_bar: &crate::ui::tab_bar::TabBar,
+    compare: &CompareShell,
+    app: &Application,
+    config: &Rc<AppConfig>,
+    paths: &Rc<AppPaths>,
+) -> std::rc::Rc<dyn Fn(&str)> {
+    let ed = editor.clone();
+    let sess = session.clone();
+    let db = db.clone();
+    let ws = ws_shell.clone();
+    let s = stack.clone();
+    let m = mode_label.clone();
+    let tm = tab_model.clone();
+    let tb = tab_bar.clone();
+    let cmp = compare.clone();
+    let app = app.clone();
+    let cfg = config.clone();
+    let pth = paths.clone();
+
+    std::rc::Rc::new(move |cmd: &str| match cmd {
+        "New Inbox Note" => {
+            ed.force_save_sync(&db, &sess);
+            ed.new_note(&sess);
+            tm.borrow_mut().new_blank(NoteSource::Inbox);
+            tb.refresh();
+            s.set_visible_child_name("editor");
+            m.set_text("Editor");
+        }
+        "New Workspace Note" => {
+            ws.new_note_in_current_room();
+            s.set_visible_child_name("workspace");
+            m.set_text("Workspace");
+        }
+        "Close Tab" => {
+            let (tab_id, src) = {
+                let model = tm.borrow();
+                match model.active_tab() {
+                    Some(t) => (t.tab_id.clone(), Some(t.source.clone())),
+                    None => return,
+                }
+            };
+            match src {
+                Some(NoteSource::Inbox) => ed.force_save_sync(&db, &sess),
+                Some(NoteSource::Workspace(_)) => ws.force_save_sync(),
+                None => {}
+            }
+            tm.borrow_mut().close(&tab_id);
+            let new_id = tm.borrow().active_tab().map(|t| t.tab_id.clone());
+            if let Some(id) = new_id {
+                switch_to_tab(&id, &tm, &ed, &ws, &sess, &db, &s, &m);
+            }
+            tb.refresh();
+        }
+        "Next Tab" => {
+            ed.force_save_sync(&db, &sess);
+            tm.borrow_mut().next_tab();
+            let id = tm.borrow().active_tab().map(|t| t.tab_id.clone());
+            if let Some(id) = id {
+                switch_to_tab(&id, &tm, &ed, &ws, &sess, &db, &s, &m);
+                tb.refresh();
+            }
+        }
+        "Previous Tab" => {
+            ed.force_save_sync(&db, &sess);
+            tm.borrow_mut().prev_tab();
+            let id = tm.borrow().active_tab().map(|t| t.tab_id.clone());
+            if let Some(id) = id {
+                switch_to_tab(&id, &tm, &ed, &ws, &sess, &db, &s, &m);
+                tb.refresh();
+            }
+        }
+        "Open Current Note in New Window" | "New Window" => {
+            crate::app::open_new_window(&app, db.clone(), cfg.clone(), pth.clone());
+        }
+        "Open Compare Mode" => {
+            ed.force_save_sync(&db, &sess);
+            if let Some(note_id) = sess.borrow().note_id.clone() {
+                let note = db
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.get_note(&note_id).ok().flatten());
+                if let Some(note) = note {
+                    cmp.load_left_inbox(&note);
+                }
+            }
+            s.set_visible_child_name("compare");
+            m.set_text("Compare");
+        }
+        "Split Note" => {
+            let note_id = sess.borrow().note_id.clone();
+            if let Some(nid) = note_id {
+                if let Some(f) = ed.on_split.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        }
+        "Bookmark Version" => {
+            let note_id = sess.borrow().note_id.clone();
+            if let Some(nid) = note_id {
+                if let Some(f) = ed.on_bookmark.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        }
+        "Show Version History" => {
+            let note_id = sess.borrow().note_id.clone();
+            if let Some(nid) = note_id {
+                if let Some(f) = ed.on_history.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        }
+        "Merge Notes" => {
+            let note_id = sess.borrow().note_id.clone();
+            if let Some(nid) = note_id {
+                if let Some(f) = ed.on_merge.borrow().as_ref() {
+                    f(nid);
+                }
+            }
+        }
+        other => {
+            eprintln!("blot: general command '{other}' not handled");
+        }
+    })
 }
 
 // ─── Launch config ────────────────────────────────────────────────────────────

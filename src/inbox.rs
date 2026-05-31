@@ -4,13 +4,14 @@
 /// Path: `~/.local/share/blot/inbox.db`
 /// This is NOT a `.water` file. It is private to Blot and invisible to all
 /// other Watercolor apps until the user places a note into a workspace.
+use crate::note_version::NoteVersion;
 use rusqlite::{params, Connection, Result};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current schema version. Increment when making incompatible changes.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 // ── Pin and Recent entries ────────────────────────────────────────────────────
 
@@ -175,6 +176,17 @@ impl InboxDb {
             );
         }
 
+        // V5 → add version snapshots table + merge-tracking columns.
+        if version < 5 {
+            self.conn.execute_batch(SCHEMA_V5)?;
+            let _ = self.conn.execute_batch(
+                "ALTER TABLE inbox_notes ADD COLUMN merged_into_kind TEXT;
+                 ALTER TABLE inbox_notes ADD COLUMN merged_into_id TEXT;
+                 ALTER TABLE inbox_notes ADD COLUMN merged_into_workspace_path TEXT;
+                 ALTER TABLE inbox_notes ADD COLUMN merged_at TEXT;",
+            );
+        }
+
         if version < SCHEMA_VERSION {
             self.conn.execute(
                 "INSERT INTO inbox_schema_version(version) VALUES (?1)
@@ -332,6 +344,145 @@ impl InboxDb {
             Some(Err(e)) => Err(e),
             None => Ok(None),
         }
+    }
+
+    // ── Version snapshots ─────────────────────────────────────────────────────
+
+    /// Snapshot the current state of `note` as a version record.
+    pub fn create_version(
+        &self,
+        note: &InboxNote,
+        reason: &str,
+        is_bookmark: bool,
+        bookmark_name: Option<&str>,
+        bookmark_kind: Option<&str>,
+        operation_id: Option<&str>,
+    ) -> Result<NoteVersion> {
+        let id = new_note_id();
+        let now = now_iso8601();
+        self.conn.execute(
+            "INSERT INTO inbox_note_versions
+               (id, note_id, title, body, document_json, created_at, reason,
+                is_bookmark, bookmark_name, bookmark_kind, operation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                note.id,
+                note.title,
+                note.body,
+                note.document_json,
+                now,
+                reason,
+                is_bookmark as i64,
+                bookmark_name,
+                bookmark_kind,
+                operation_id,
+            ],
+        )?;
+        Ok(NoteVersion {
+            id,
+            note_id: note.id.clone(),
+            title: note.title.clone(),
+            body: note.body.clone(),
+            document_json: note.document_json.clone(),
+            created_at: now,
+            reason: reason.to_string(),
+            is_bookmark,
+            bookmark_name: bookmark_name.map(str::to_string),
+            bookmark_kind: bookmark_kind.map(str::to_string),
+            operation_id: operation_id.map(str::to_string),
+        })
+    }
+
+    /// Return all version records for a note, newest first.
+    pub fn list_versions(&self, note_id: &str) -> Result<Vec<NoteVersion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, note_id, title, body, document_json, created_at, reason,
+                    is_bookmark, bookmark_name, bookmark_kind, operation_id
+             FROM inbox_note_versions
+             WHERE note_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![note_id], |row| {
+                Ok(NoteVersion {
+                    id: row.get(0)?,
+                    note_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    document_json: row.get(4)?,
+                    created_at: row.get(5)?,
+                    reason: row.get(6)?,
+                    is_bookmark: row.get::<_, i64>(7)? != 0,
+                    bookmark_name: row.get(8)?,
+                    bookmark_kind: row.get(9)?,
+                    operation_id: row.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Fetch a single version by ID. Returns `None` when not found.
+    pub fn get_version(&self, version_id: &str) -> Result<Option<NoteVersion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, note_id, title, body, document_json, created_at, reason,
+                    is_bookmark, bookmark_name, bookmark_kind, operation_id
+             FROM inbox_note_versions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![version_id], |row| {
+            Ok(NoteVersion {
+                id: row.get(0)?,
+                note_id: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+                document_json: row.get(4)?,
+                created_at: row.get(5)?,
+                reason: row.get(6)?,
+                is_bookmark: row.get::<_, i64>(7)? != 0,
+                bookmark_name: row.get(8)?,
+                bookmark_kind: row.get(9)?,
+                operation_id: row.get(10)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(Some(v)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Archive a note as merged into another note.
+    /// Sets `is_archived = 1` and records the merge destination.
+    pub fn archive_as_merged(
+        &self,
+        note_id: &str,
+        merged_into_kind: &str,
+        merged_into_id: &str,
+        merged_into_workspace_path: &str,
+    ) -> Result<()> {
+        let now = now_iso8601();
+        let rows = self.conn.execute(
+            "UPDATE inbox_notes
+             SET is_archived                  = 1,
+                 merged_into_kind             = ?1,
+                 merged_into_id               = ?2,
+                 merged_into_workspace_path   = ?3,
+                 merged_at                    = ?4,
+                 updated_at                   = ?4
+             WHERE id = ?5 AND is_archived = 0",
+            params![
+                merged_into_kind,
+                merged_into_id,
+                merged_into_workspace_path,
+                now,
+                note_id
+            ],
+        )?;
+        if rows == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
     }
 
     // ── Pins ──────────────────────────────────────────────────────────────────
@@ -522,6 +673,27 @@ CREATE TABLE IF NOT EXISTS blot_recent (
     accessed_at    TEXT NOT NULL,
     UNIQUE(target_kind, target_id, workspace_path)
 );
+";
+
+/// V5 migration: version snapshot table for inbox notes.
+const SCHEMA_V5: &str = "
+CREATE TABLE IF NOT EXISTS inbox_note_versions (
+    id            TEXT NOT NULL PRIMARY KEY,
+    note_id       TEXT NOT NULL,
+    title         TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL DEFAULT '',
+    document_json TEXT,
+    created_at    TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    is_bookmark   INTEGER NOT NULL DEFAULT 0,
+    bookmark_name TEXT,
+    bookmark_kind TEXT,
+    operation_id  TEXT,
+    FOREIGN KEY(note_id) REFERENCES inbox_notes(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_note_versions_note
+    ON inbox_note_versions(note_id, created_at DESC);
 ";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -875,5 +1047,83 @@ mod tests {
 
         let result = db.mark_as_placed("n1", "/ws/test.water", "note-id", "Dest");
         assert!(result.is_err(), "double-placing should fail");
+    }
+
+    // ── Version snapshot tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn create_and_list_versions() {
+        let db = open_temp_db();
+        let note = sample_note("n1");
+        db.upsert_note(&note).unwrap();
+
+        db.create_version(&note, "before split", false, None, None, None)
+            .unwrap();
+        db.create_version(
+            &note,
+            "manual bookmark",
+            true,
+            Some("My Bookmark"),
+            Some("manual"),
+            None,
+        )
+        .unwrap();
+
+        let versions = db.list_versions("n1").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].bookmark_name.as_deref(), Some("My Bookmark"));
+        assert_eq!(versions[1].reason, "before split");
+    }
+
+    #[test]
+    fn get_version_by_id() {
+        let db = open_temp_db();
+        let note = sample_note("n1");
+        db.upsert_note(&note).unwrap();
+        let v = db
+            .create_version(&note, "test", false, None, None, None)
+            .unwrap();
+
+        let fetched = db.get_version(&v.id).unwrap().unwrap();
+        assert_eq!(fetched.id, v.id);
+        assert_eq!(fetched.note_id, "n1");
+    }
+
+    #[test]
+    fn get_version_missing_returns_none() {
+        let db = open_temp_db();
+        assert!(db.get_version("ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn versions_for_wrong_note_not_returned() {
+        let db = open_temp_db();
+        let n1 = sample_note("n1");
+        let n2 = sample_note("n2");
+        db.upsert_note(&n1).unwrap();
+        db.upsert_note(&n2).unwrap();
+        db.create_version(&n1, "snap", false, None, None, None)
+            .unwrap();
+
+        assert_eq!(db.list_versions("n2").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn archive_as_merged_archives_note() {
+        let db = open_temp_db();
+        db.upsert_note(&sample_note("n1")).unwrap();
+        db.archive_as_merged("n1", "inbox_note", "n2", "").unwrap();
+
+        assert!(db.list_notes().unwrap().is_empty());
+        let note = db.get_note("n1").unwrap().unwrap();
+        assert!(note.is_archived);
+    }
+
+    #[test]
+    fn archive_as_merged_nonexistent_errors() {
+        let db = open_temp_db();
+        assert!(db
+            .archive_as_merged("ghost", "inbox_note", "n2", "")
+            .is_err());
     }
 }

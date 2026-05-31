@@ -5,6 +5,7 @@ use std::path::PathBuf;
 /// All paths follow the XDG Base Directory Specification.
 /// Create required directories on first run with `ensure_dirs()`.
 #[allow(dead_code)] // inbox_db and known_workspaces used in Prompt 2+
+#[derive(Clone)]
 pub struct AppPaths {
     /// `~/.config/blot/`
     pub config_dir: PathBuf,

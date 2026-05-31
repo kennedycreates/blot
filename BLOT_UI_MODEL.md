@@ -1,4 +1,4 @@
-# Blot UI Model — v0.2 (Prompt 7)
+# Blot UI Model — v0.4 (Prompt 9)
 
 This document describes Blot's visual structure, modes, and interactive surfaces.
 
@@ -66,25 +66,41 @@ Blot is a native GTK4 app. It supports tabs and multiple windows.
 
 ---
 
-## Tabs
+## Tabs (Implemented — Prompt 9)
 
-Blot supports multiple tabs per window. Each tab is an independent editor context.
+Blot supports multiple tabs per window. The tab bar sits below the header bar, above the mode stack.
 
-- Tabs may be notes, the Desk, the Room Map, or Search.
-- Tabs have titles (note title, or mode name).
-- Tabs can be dragged to new windows.
-- Tabs remember scroll position and cursor location.
-- Closing a tab does not close the note. Notes are autosaved.
+**Tab strip:**
+- Each tab shows a source badge ("I" for Inbox, "W" for workspace), the note title (truncated to 22 chars), and an "×" close button.
+- A "+" button at the right end opens a new blank Inbox note tab.
+- The bar hides automatically when no tabs are open.
+
+**Tab behavior:**
+- Closing a tab saves the note first (force-save), then switches to the nearest remaining tab.
+- Opening a note that is already open in an existing tab focuses that tab instead of creating a duplicate.
+- Switching tabs force-saves the outgoing note, then loads the incoming note from the DB into the shared editor surface.
+
+**Keyboard:**
+- Ctrl+N or Ctrl+T — new blank Inbox note in a new tab; switches to Editor Mode.
+- Ctrl+Page Down — next tab (wraps around).
+- Ctrl+Page Up — previous tab (wraps around).
+
+**Known limitations (Prompt 9):**
+- Cursor position and scroll offset are not restored when switching tabs; the editor always opens the note at the top.
+- Tabs are note editor tabs only. Desk, Search, and Room Map do not have dedicated tabs.
+- Dragging tabs to new windows is not implemented.
 
 ---
 
-## Multiple Windows
+## Multiple Windows (Implemented — Prompt 9)
 
 Blot supports multiple top-level windows.
 
-- Each window is fully independent.
-- All windows share the same Inbox and workspace data.
-- Compare Mode can be opened as a two-panel split within one window, or as two separate windows.
+- Each window is fully independent (its own mode stack, tab bar, workspace DB).
+- All windows share the same Inbox database — inbox writes from any window are visible in all windows on next access.
+- Workspace databases are opened independently per-window; simultaneous edits to the same workspace note in two windows follow last-save-wins semantics.
+- "New Window" opens via: header bar → Commands → "New Window", or Ctrl+Alt+N.
+- "Open Current Note in New Window" opens a fresh window (the specific note is not pre-loaded; find it via Search or Desk in the new window).
 
 ---
 
@@ -229,10 +245,9 @@ Stored in `blot_recent` in `inbox.db` (schema v3). UPSERT on `(target_kind, targ
 
 #### Known Limitations (Prompt 7)
 
-- **No full-text search in Desk** — Prompt 6+.
-- **No Sort/Filter controls** — Prompt 6+.
+- **No full-text search in Desk** — future prompt.
+- **No Sort/Filter controls** — future prompt.
 - **Right panel workspace name is static** — shown at Desk-open time; does not auto-refresh if the workspace changes.
-- **Room Map, Arrange Mode, Compare Mode** — future prompts.
 
 ---
 
@@ -364,32 +379,82 @@ Place Note is a **move** operation: the Inbox note is archived in the Inbox and 
 
 ---
 
-### 4. Room Map Mode
+### 4. Room Map Mode (Implemented — Prompt 8)
 
-Visual and list representation of Rooms and their Doors (connections).
+Visual and list representation of Rooms and their Doors (connections) within the open workspace.
 
-**Map view:**
-- Rooms are shown as labeled rectangles or cards on a canvas.
-- Doors are drawn as lines connecting rooms. Line weight/style reflects connection type: normal (default), strong (bolder), weak (dashed or lighter).
-- Rooms can be dragged on the canvas to arrange the map.
-- Click a room to select it and see its shelves/piles in the sidebar.
-- Double-click a room to navigate into it.
-- Right-click a room: Rename, Add Door to..., Remove, View Notes.
-- "Add Door" draws a connection to another selected room with a connection type picker.
+**Entry points:**
+- "Room Map" header button in the main window.
+- Command palette: "Open Room Map".
+- Launch argument: `--room-map` (Prompt 9 TODO).
+
+**Toolbar:**
+- "Map" / "List" toggle buttons — switch between canvas and sidebar list view.
+- "New Room" button — opens the create-room dialog.
+- "Connect" button — opens the connect-rooms dialog.
+- "Open Room" button — navigates into the selected room's Workspace view.
+- Workspace name label.
+
+**Map view (Cairo canvas):**
+
+Rooms are drawn as labeled cards (164 × 88 px, rounded corners) on a dark charcoal canvas. Each card shows: room name (bold, cream text), note count, and container count (shelves + piles). The selected room card has a brass accent border.
+
+Doors (connections) are drawn as lines between room centers:
+- **Normal** — solid gray line, 1.8 px wide.
+- **Strong** — solid brass/gold line, 3.0 px wide.
+- **Weak** — dashed gray line, 1.0 px wide (6–4 dash pattern).
+
+**Auto-layout:** When all rooms have no saved position (`map_x = map_y = 0.0`), rooms are arranged in a circle in memory. These positions are *not* saved to the database until the user drags a room.
+
+**Drag to reposition:** Click and drag any room card. Releasing saves the new position to `blot_rooms.map_x` / `map_y`.
+
+**Selection:** Click a room card to select it. Selection is highlighted with a brass border; the selected room's connections are shown in the detail sidebar when in list view.
+
+**Open room:** Double-click a room card to navigate into it. Switches to Workspace Mode showing that room's notes.
+
+Canvas minimum size: 600 × 460 px. Canvas does not scroll in this release (Prompt 9 TODO).
 
 **List/sidebar view:**
-- Room list on the left, showing name, note count, shelf/pile count.
-- Selected room shows its details (shelves, piles, loose notes, door connections) in the main area.
-- Toggle between map view and list view from Room Map toolbar.
 
-**Room Map actions:**
-- Create Room
-- Rename Room
-- Add Door
-- Edit Door connection type
-- Remove Door
-- Remove Room (must be empty or confirm migration of notes)
-- Zoom and pan the canvas
+Left side: a scrollable list of all rooms. Each row shows room name, note count, and container count. Clicking a row selects the room.
+
+Right side (detail panel for selected room):
+- Room name as a section header.
+- All Doors (connections) listed with their connection type label.
+- Shelf and Pile count.
+- "Open Room" button to navigate to Workspace Mode for that room.
+
+**Room creation:**
+
+"New Room" button or "Create Room" command opens a modal prompt dialog with a name entry field. The new room is created in the database with `map_x = 0.0, map_y = 0.0` and appears in the next refresh.
+
+**Connection management:**
+
+| Action | Behavior |
+|--------|----------|
+| Connect Rooms | Dialog with two room dropdowns and a connection type dropdown (Normal / Strong / Weak). Validates no self-connection and no duplicate. |
+| Change Room Connection Type | Dialog to select an existing connection from a list and pick a new type. |
+| Remove Room Connection | Dialog listing connections for the selected room; removes the chosen one. Does NOT delete rooms or notes. |
+
+Connections are undirected: internally stored with `room_a_id ≤ room_b_id` (lexicographic). Duplicate connections are rejected at the database level.
+
+**Command palette commands (Room Map context):**
+
+| Command | Behavior |
+|---------|----------|
+| Open Room Map | Switches the main stack to Room Map and refreshes. |
+| Create Room | Opens the create-room dialog. |
+| Connect Rooms | Opens the connect-rooms dialog. |
+| Change Room Connection Type | Opens the change-type dialog. |
+| Remove Room Connection | Opens the remove-connection dialog. |
+| Open Selected Room | Navigates to Workspace Mode for the selected room. |
+
+**Known limitations (Prompt 8):**
+- Canvas does not scroll or zoom. Large workspaces with many rooms may have overlapping cards.
+- Auto-layout positions are not written to the database — only explicit drag moves persist.
+- Command palette Room Map commands navigate to Room Map but do not auto-open their dialogs if Room Map is not already the active view.
+- Right-click context menu on room cards is not implemented.
+- Zoom and pan are Prompt 9 TODOs.
 
 ---
 
@@ -420,34 +485,52 @@ Auto-bookmark fires when entering Arrange Mode if the note has any content (so t
 
 ---
 
-### 6. Two-Panel Compare Mode
+### 6. Two-Panel Compare Mode (Implemented — Prompt 9)
 
-Compare two notes side by side, with the ability to copy or move content between them.
+Compare two notes side by side, with the ability to copy or move text between them.
 
 **Layout:**
 ```
-┌───────────────────┬──────────────────────┐
-│  Note A           │  Note B              │
-│  [title]          │  [title]             │
-│                   │                      │
-│  [block content]  │  [block content]     │
-│                   │                      │
-│  [select blocks]  │  [select blocks]     │
-└───────────────────┴──────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  ← Exit Compare  [spacer]  ← Copy  ← Move  ⇄ Swap  Move →  Copy → │
+├──────────────────────┬───────────────────────────────────┤
+│  A  [Note A title]   │  B  [Note B title]                │
+│  ──────────────────  │  ───────────────────────────────  │
+│                      │                                   │
+│  [editable body]     │  [editable body]                  │
+│                      │                                   │
+└──────────────────────┴───────────────────────────────────┘
 ```
 
-**Actions:**
-- Select one or more blocks in Note A → "Copy to Note B" or "Move to Note B".
-- Block selection highlights blocks in place.
-- Move operation removes the blocks from Note A and appends/inserts them to Note B.
-- Copy operation duplicates the content.
-- Both operations confirm before executing.
-- Auto-bookmark fires on both notes before any move.
+**Entry points:**
+- Header bar → "Compare" button: saves the current note and loads it into panel A.
+- Command palette → "Open Compare Mode": same behavior.
 
-**Opening Compare Mode:**
-- Command palette → "Open Compare Mode"
-- Default: current note is Note A, user picks Note B from a note picker.
-- Can also be opened with two notes already selected (future).
+**Note picker (panel B):**
+- "Choose a note" dialog with a search filter and scrollable list.
+- Shows all Inbox notes (prefixed with "[Inbox]") and all workspace notes (prefixed with the workspace name).
+- Filtering is case-insensitive substring match on the displayed label.
+- Selected note loads into panel B on row activation or Enter.
+
+**Actions (toolbar buttons):**
+- **Copy →** — copies selected text from panel A and appends it to panel B (with a "--- Moved from: [title] ---" header).
+- **Move →** — same as Copy →, then deletes the selected text from panel A.
+- **← Copy** — copies selected text from panel B and appends it to panel A.
+- **← Move** — same as ← Copy, then deletes the selected text from panel B.
+- **⇄ Swap** — saves both panels, then swaps their content and session metadata.
+- **← Exit Compare** — saves both panels, then returns to Editor Mode.
+
+**Autosave:**
+- Each panel autosaves independently on a 1.5 s debounce after each keystroke.
+- Panel A saves to the Inbox DB if the note is an Inbox note; to the open workspace DB if it is a workspace note.
+- Panel B follows the same routing.
+- Both panels are force-saved when "← Exit Compare" is pressed, when the window is closed, or when Compare Mode is exited via any path.
+
+**Known limitations (Prompt 9):**
+- Note picker always loads into panel B. There is no separate "pick for panel A" button in the picker.
+- Swap is a text-level swap; block structure (headings, lists) is preserved as plain text but not re-parsed into blocks.
+- Autosave is not confirmed by a visible "Saved" indicator in the panel (unlike the main editor's status bar).
+- Auto-bookmark before move is not yet implemented (Prompt 10 TODO).
 
 ---
 
@@ -457,45 +540,56 @@ The command palette is a universal overlay available at all times.
 
 **Trigger:** Keyboard shortcut (e.g., Ctrl+P or Ctrl+Shift+P) or a visible toolbar button. Trigger must be discoverable without memorizing shortcuts.
 
-**Current commands (Prompt 7):**
+**Current commands (Prompt 9):**
 
-| Command | Category |
-|---------|----------|
-| Open Desk | Desk |
-| Close Desk | Desk |
-| Open Focused Workspace | Desk |
-| Switch Workspace | Desk |
-| Pin Current Note | Desk |
-| Unpin Current Note | Desk |
-| Search | Navigation |
-| Search All Workspaces | Navigation |
-| Open Room Map | Navigation |
-| New Inbox Note | Note creation |
-| New Workspace Note | Note creation |
-| Place Note | Note creation |
-| Create Room | Workspace organization |
-| Create Shelf | Workspace organization |
-| Create Pile | Workspace organization |
-| Convert Pile to Shelf | Workspace organization |
-| Attach Palette | Note operations |
-| Split Note | Note operations |
-| Merge Notes | Note operations |
-| Bookmark Version | Note operations |
-| Show Version History | Note operations |
-| Toggle Markdown Source | Note operations |
-| Attach Image | Note operations |
-| Open Linked File | Note operations |
-| Absorb File | Note operations |
-| Open Compare Mode | View modes |
-| Open Arrange Mode | View modes |
-| Export Note | Export |
-| Export All Notes | Export |
+| Command | Category | Status |
+|---------|----------|--------|
+| Open Desk | Desk | stub |
+| Close Desk | Desk | stub |
+| Open Focused Workspace | Desk | stub |
+| Switch Workspace | Desk | stub |
+| Pin Current Note | Desk | stub |
+| Unpin Current Note | Desk | stub |
+| Search | Navigation | stub |
+| Search All Workspaces | Navigation | stub |
+| Open Room Map | Navigation | **wired** |
+| Create Room | Room Map | **wired** |
+| Connect Rooms | Room Map | **wired** |
+| Change Room Connection Type | Room Map | **wired** |
+| Remove Room Connection | Room Map | **wired** |
+| Open Selected Room | Room Map | **wired** |
+| New Inbox Note | Tabs & windows | **wired** |
+| New Workspace Note | Tabs & windows | **wired** |
+| Close Tab | Tabs & windows | **wired** |
+| Next Tab | Tabs & windows | **wired** |
+| Previous Tab | Tabs & windows | **wired** |
+| Open Current Note in New Window | Tabs & windows | **wired** |
+| New Window | Tabs & windows | **wired** |
+| Place Note | Note creation | **wired** |
+| Create Shelf | Workspace organization | stub |
+| Create Pile | Workspace organization | stub |
+| Convert Pile to Shelf | Workspace organization | stub |
+| Attach Palette | Note operations | stub |
+| Split Note | Note operations | stub |
+| Merge Notes | Note operations | stub |
+| Bookmark Version | Note operations | stub |
+| Show Version History | Note operations | stub |
+| Toggle Markdown Source | Note operations | stub |
+| Attach Image | Note operations | stub |
+| Open Linked File | Note operations | stub |
+| Absorb File | Note operations | stub |
+| Open Compare Mode | View modes | **wired** |
+| Open Arrange Mode | View modes | stub |
+| Export Note | Export | stub |
+| Export All Notes | Export | stub |
 
 **Palette behavior:**
-- Fuzzy search through the command list.
-- "Place Note" is wired (Prompt 7). It calls the Place Note picker for the currently open Inbox note. If no Inbox note is open, the command has no effect.
-- Other commands log to stderr and update the status bar; full implementations arrive in later prompts.
-- Recent commands appear at the top.
+- Fuzzy search through the command list. First visible row is selected automatically as you type.
+- "Place Note" is wired (Prompt 7): calls the Place Note picker for the currently open Inbox note.
+- Room Map commands ("Open Room Map", "Create Room", "Connect Rooms", "Change Room Connection Type", "Remove Room Connection", "Open Selected Room") are wired (Prompt 8): navigate to Room Map and dispatch to the appropriate dialog.
+- Tab/window commands (New Inbox Note, New Workspace Note, Close Tab, Next Tab, Previous Tab, New Window, Open Current Note in New Window) and "Open Compare Mode" are wired (Prompt 9).
+- Stub commands log to stderr; full implementations arrive in later prompts.
+- Recent commands appear at the top (future).
 
 ---
 

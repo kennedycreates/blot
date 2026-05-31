@@ -6,7 +6,10 @@
 //!
 //! Schema version history:
 //! - 1 (Prompt 4): initial Blot workspace schema.
+//! - 2 (Prompt 10): `note_versions` snapshots + `merged_into_note_id` / `merged_at`
+//!   columns on `notes` for version history, bookmarks, and merge tracking.
 
+use crate::note_version::NoteVersion;
 use rusqlite::{params, Connection, Result as SqlResult};
 use std::error::Error;
 use std::fmt;
@@ -14,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // ─── Error ────────────────────────────────────────────────────────────────────
 
@@ -70,6 +73,10 @@ pub struct Room {
     pub name: String,
     pub description: Option<String>,
     pub sort_position: f64,
+    /// X position on the Room Map canvas (0.0 = not yet positioned).
+    pub map_x: f64,
+    /// Y position on the Room Map canvas (0.0 = not yet positioned).
+    pub map_y: f64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -297,6 +304,7 @@ impl WorkspaceDb {
 
     fn apply_schema(&self) -> Result<(), WorkspaceError> {
         self.conn.execute_batch(SCHEMA_V1)?;
+        self.conn.execute_batch(SCHEMA_V2)?;
         Ok(())
     }
 
@@ -344,9 +352,26 @@ impl WorkspaceDb {
         }
 
         if version < 1 {
-            // Back up before migrating existing data.
             let _ = backup_workspace(&self.path);
             self.apply_schema()?;
+            self.conn.execute(
+                "UPDATE blot_workspace_meta SET schema_version = ?1 WHERE id = 1",
+                params![SCHEMA_VERSION],
+            )?;
+            return Ok(());
+        }
+
+        // V1 → V2: add note_versions table and merged_at column.
+        if version < 2 {
+            self.conn.execute_batch(SCHEMA_V2)?;
+            // These ALTERs are best-effort: ignore "duplicate column" errors so
+            // re-running migration on a partially-migrated file is safe.
+            let _ = self
+                .conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN merged_into_note_id TEXT;");
+            let _ = self
+                .conn
+                .execute_batch("ALTER TABLE notes ADD COLUMN merged_at TEXT;");
             self.conn.execute(
                 "UPDATE blot_workspace_meta SET schema_version = ?1 WHERE id = 1",
                 params![SCHEMA_VERSION],
@@ -390,6 +415,8 @@ impl WorkspaceDb {
             name: name.to_string(),
             description: None,
             sort_position: max_pos + 1.0,
+            map_x: 0.0,
+            map_y: 0.0,
             created_at: now.clone(),
             updated_at: now,
         })
@@ -397,7 +424,7 @@ impl WorkspaceDb {
 
     pub fn list_rooms(&self) -> Result<Vec<Room>, WorkspaceError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, sort_position, created_at, updated_at
+            "SELECT id, name, description, sort_position, map_x, map_y, created_at, updated_at
              FROM blot_rooms ORDER BY sort_position ASC",
         )?;
         let rooms = stmt
@@ -407,8 +434,10 @@ impl WorkspaceDb {
                     name: row.get(1)?,
                     description: row.get(2)?,
                     sort_position: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    map_x: row.get(4)?,
+                    map_y: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })?
             .collect::<SqlResult<Vec<_>>>()?;
@@ -417,7 +446,7 @@ impl WorkspaceDb {
 
     pub fn get_room(&self, id: &str) -> Result<Option<Room>, WorkspaceError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, sort_position, created_at, updated_at
+            "SELECT id, name, description, sort_position, map_x, map_y, created_at, updated_at
              FROM blot_rooms WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], |row| {
@@ -426,8 +455,10 @@ impl WorkspaceDb {
                 name: row.get(1)?,
                 description: row.get(2)?,
                 sort_position: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                map_x: row.get(4)?,
+                map_y: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })?;
         match rows.next() {
@@ -448,23 +479,53 @@ impl WorkspaceDb {
 
     // ── Room connections (Doors) ───────────────────────────────────────────
 
-    #[allow(dead_code)]
     pub fn create_room_connection(
         &self,
         room_a_id: &str,
         room_b_id: &str,
         connection_type: &str,
     ) -> Result<RoomConnection, WorkspaceError> {
+        if room_a_id == room_b_id {
+            return Err(WorkspaceError::Invalid(
+                "cannot connect a room to itself".to_string(),
+            ));
+        }
+        validate_connection_type(connection_type)?;
+
         // Always store room_a < room_b to keep connections undirected.
         let (a, b) = if room_a_id <= room_b_id {
             (room_a_id, room_b_id)
         } else {
             (room_b_id, room_a_id)
         };
+
+        // Check for an existing connection between these two rooms.
+        let existing: Option<RoomConnection> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, room_a_id, room_b_id, connection_type, label, created_at
+                 FROM blot_room_connections WHERE room_a_id = ?1 AND room_b_id = ?2",
+            )?;
+            stmt.query_row(params![a, b], |row| {
+                Ok(RoomConnection {
+                    id: row.get(0)?,
+                    room_a_id: row.get(1)?,
+                    room_b_id: row.get(2)?,
+                    connection_type: row.get(3)?,
+                    label: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })
+            .ok()
+        };
+
+        if let Some(conn) = existing {
+            return Ok(conn);
+        }
+
         let id = new_id();
         let now = now_iso8601();
         self.conn.execute(
-            "INSERT OR IGNORE INTO blot_room_connections
+            "INSERT INTO blot_room_connections
              (id, room_a_id, room_b_id, connection_type, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, a, b, connection_type, now],
@@ -479,7 +540,6 @@ impl WorkspaceDb {
         })
     }
 
-    #[allow(dead_code)]
     pub fn list_room_connections(&self) -> Result<Vec<RoomConnection>, WorkspaceError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, room_a_id, room_b_id, connection_type, label, created_at
@@ -498,6 +558,93 @@ impl WorkspaceDb {
             })?
             .collect::<SqlResult<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// List all connections that include the given room (undirected).
+    pub fn list_connections_for_room(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<RoomConnection>, WorkspaceError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, room_a_id, room_b_id, connection_type, label, created_at
+             FROM blot_room_connections
+             WHERE room_a_id = ?1 OR room_b_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![room_id], |row| {
+                Ok(RoomConnection {
+                    id: row.get(0)?,
+                    room_a_id: row.get(1)?,
+                    room_b_id: row.get(2)?,
+                    connection_type: row.get(3)?,
+                    label: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete a room connection by ID. Does not affect rooms or notes.
+    pub fn delete_room_connection(&self, id: &str) -> Result<(), WorkspaceError> {
+        self.conn.execute(
+            "DELETE FROM blot_room_connections WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Change the connection type of an existing room connection.
+    pub fn update_room_connection_type(
+        &self,
+        id: &str,
+        connection_type: &str,
+    ) -> Result<(), WorkspaceError> {
+        validate_connection_type(connection_type)?;
+        self.conn.execute(
+            "UPDATE blot_room_connections SET connection_type = ?1 WHERE id = ?2",
+            params![connection_type, id],
+        )?;
+        Ok(())
+    }
+
+    /// Persist the Room Map canvas position of a room after the user drags it.
+    pub fn update_room_map_position(
+        &self,
+        room_id: &str,
+        x: f64,
+        y: f64,
+    ) -> Result<(), WorkspaceError> {
+        let now = now_iso8601();
+        self.conn.execute(
+            "UPDATE blot_rooms SET map_x = ?1, map_y = ?2, updated_at = ?3 WHERE id = ?4",
+            params![x, y, now, room_id],
+        )?;
+        Ok(())
+    }
+
+    /// Total note count in a room (loose + on shelves/piles).
+    pub fn room_total_note_count(&self, room_id: &str) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes n
+                 JOIN note_placements p ON n.id = p.note_id
+                 WHERE p.room_id = ?1 AND n.is_archived = 0",
+                params![room_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Number of shelves and piles in a room.
+    pub fn room_container_count(&self, room_id: &str) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM blot_shelves WHERE room_id = ?1",
+                params![room_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
     }
 
     // ── Shelves & Piles ───────────────────────────────────────────────────
@@ -849,6 +996,136 @@ impl WorkspaceDb {
             .unwrap_or(0)
     }
 
+    // ── Version snapshots ─────────────────────────────────────────────────
+
+    pub fn create_note_version(
+        &self,
+        note: &WorkspaceNote,
+        reason: &str,
+        is_bookmark: bool,
+        bookmark_name: Option<&str>,
+        bookmark_kind: Option<&str>,
+        operation_id: Option<&str>,
+    ) -> Result<NoteVersion, WorkspaceError> {
+        let id = new_id();
+        let now = now_iso8601();
+        self.conn.execute(
+            "INSERT INTO note_versions
+               (id, note_id, title, body, document_json, created_at, reason,
+                is_bookmark, bookmark_name, bookmark_kind, operation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                note.id,
+                note.title,
+                note.body,
+                note.document_json,
+                now,
+                reason,
+                is_bookmark as i64,
+                bookmark_name,
+                bookmark_kind,
+                operation_id,
+            ],
+        )?;
+        Ok(NoteVersion {
+            id,
+            note_id: note.id.clone(),
+            title: note.title.clone(),
+            body: note.body.clone(),
+            document_json: note.document_json.clone(),
+            created_at: now,
+            reason: reason.to_string(),
+            is_bookmark,
+            bookmark_name: bookmark_name.map(str::to_string),
+            bookmark_kind: bookmark_kind.map(str::to_string),
+            operation_id: operation_id.map(str::to_string),
+        })
+    }
+
+    pub fn list_note_versions(&self, note_id: &str) -> Result<Vec<NoteVersion>, WorkspaceError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, note_id, title, body, document_json, created_at, reason,
+                    is_bookmark, bookmark_name, bookmark_kind, operation_id
+             FROM note_versions
+             WHERE note_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![note_id], |row| {
+                Ok(NoteVersion {
+                    id: row.get(0)?,
+                    note_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    document_json: row.get(4)?,
+                    created_at: row.get(5)?,
+                    reason: row.get(6)?,
+                    is_bookmark: row.get::<_, i64>(7)? != 0,
+                    bookmark_name: row.get(8)?,
+                    bookmark_kind: row.get(9)?,
+                    operation_id: row.get(10)?,
+                })
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_note_version(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<NoteVersion>, WorkspaceError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, note_id, title, body, document_json, created_at, reason,
+                    is_bookmark, bookmark_name, bookmark_kind, operation_id
+             FROM note_versions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![version_id], |row| {
+            Ok(NoteVersion {
+                id: row.get(0)?,
+                note_id: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+                document_json: row.get(4)?,
+                created_at: row.get(5)?,
+                reason: row.get(6)?,
+                is_bookmark: row.get::<_, i64>(7)? != 0,
+                bookmark_name: row.get(8)?,
+                bookmark_kind: row.get(9)?,
+                operation_id: row.get(10)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(Some(v)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    /// Archive a workspace note as merged into another note.
+    pub fn archive_as_merged(
+        &self,
+        note_id: &str,
+        merged_into_id: &str,
+    ) -> Result<(), WorkspaceError> {
+        let now = now_iso8601();
+        let rows = self.conn.execute(
+            "UPDATE notes
+             SET is_archived         = 1,
+                 merged_into_note_id = ?1,
+                 merged_at           = ?2,
+                 updated_at          = ?2
+             WHERE id = ?3 AND is_archived = 0",
+            params![merged_into_id, now, note_id],
+        )?;
+        if rows == 0 {
+            return Err(WorkspaceError::NotFound(format!(
+                "note '{note_id}' not found or already archived"
+            )));
+        }
+        Ok(())
+    }
+
     // ── Search ────────────────────────────────────────────────────────────
 
     /// Return all non-archived notes with their placement metadata joined in.
@@ -885,6 +1162,15 @@ impl WorkspaceDb {
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
+
+fn validate_connection_type(t: &str) -> Result<(), WorkspaceError> {
+    match t {
+        "normal" | "strong" | "weak" => Ok(()),
+        _ => Err(WorkspaceError::Invalid(format!(
+            "invalid connection type '{t}'; valid types: normal, strong, weak"
+        ))),
+    }
+}
 
 pub(crate) fn new_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -984,7 +1270,9 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at            TEXT NOT NULL,
     word_count            INTEGER NOT NULL DEFAULT 0,
     is_archived           INTEGER NOT NULL DEFAULT 0,
-    redirects_to_note_id  TEXT
+    redirects_to_note_id  TEXT,
+    merged_into_note_id   TEXT,
+    merged_at             TEXT
 );
 
 -- Where each note lives: room, shelf/pile, or loose (shelf_id IS NULL).
@@ -1001,6 +1289,27 @@ CREATE TABLE IF NOT EXISTS note_placements (
 CREATE INDEX IF NOT EXISTS idx_note_placements_room  ON note_placements(room_id);
 CREATE INDEX IF NOT EXISTS idx_note_placements_shelf ON note_placements(shelf_id);
 CREATE INDEX IF NOT EXISTS idx_notes_updated         ON notes(updated_at DESC);
+";
+
+/// V2: version snapshot table + merged_at on notes (migration adds merged_at via ALTER TABLE).
+const SCHEMA_V2: &str = "
+CREATE TABLE IF NOT EXISTS note_versions (
+    id            TEXT NOT NULL PRIMARY KEY,
+    note_id       TEXT NOT NULL,
+    title         TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL DEFAULT '',
+    document_json TEXT,
+    created_at    TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    is_bookmark   INTEGER NOT NULL DEFAULT 0,
+    bookmark_name TEXT,
+    bookmark_kind TEXT,
+    operation_id  TEXT,
+    FOREIGN KEY(note_id) REFERENCES notes(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_versions_note
+    ON note_versions(note_id, created_at DESC);
 ";
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1160,6 +1469,243 @@ mod tests {
         let conns = ws.list_room_connections().unwrap();
         assert_eq!(conns.len(), 1);
         assert_eq!(conns[0].connection_type, "normal");
+    }
+
+    #[test]
+    fn self_connection_is_rejected() {
+        let (ws, _dir) = open_temp_ws();
+        let room = ws.list_rooms().unwrap().into_iter().next().unwrap();
+        let result = ws.create_room_connection(&room.id, &room.id, "normal");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("itself"));
+    }
+
+    #[test]
+    fn duplicate_connection_returns_existing() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let c1 = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        let c2 = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        // Should return the existing connection, not create a second
+        assert_eq!(c1.id, c2.id);
+        let conns = ws.list_room_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+    }
+
+    #[test]
+    fn invalid_connection_type_is_rejected() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let result = ws.create_room_connection(&r1.id, &r2.id, "teleport");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("teleport"));
+    }
+
+    #[test]
+    fn list_connections_for_room() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let r3 = ws.create_room("Room C").unwrap();
+        ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        ws.create_room_connection(&r1.id, &r3.id, "strong").unwrap();
+        ws.create_room_connection(&r2.id, &r3.id, "weak").unwrap();
+
+        let r1_conns = ws.list_connections_for_room(&r1.id).unwrap();
+        assert_eq!(r1_conns.len(), 2);
+
+        let r2_conns = ws.list_connections_for_room(&r2.id).unwrap();
+        assert_eq!(r2_conns.len(), 2);
+
+        let r3_conns = ws.list_connections_for_room(&r3.id).unwrap();
+        assert_eq!(r3_conns.len(), 2);
+    }
+
+    #[test]
+    fn delete_room_connection() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let conn = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        ws.delete_room_connection(&conn.id).unwrap();
+        let conns = ws.list_room_connections().unwrap();
+        assert!(conns.is_empty());
+    }
+
+    #[test]
+    fn delete_connection_does_not_delete_rooms() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let conn = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        ws.delete_room_connection(&conn.id).unwrap();
+        let rooms = ws.list_rooms().unwrap();
+        assert!(rooms.iter().any(|r| r.id == r1.id));
+        assert!(rooms.iter().any(|r| r.id == r2.id));
+    }
+
+    #[test]
+    fn update_connection_type() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let conn = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        ws.update_room_connection_type(&conn.id, "strong").unwrap();
+        let conns = ws.list_room_connections().unwrap();
+        assert_eq!(conns[0].connection_type, "strong");
+    }
+
+    #[test]
+    fn update_connection_type_invalid_rejected() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let conn = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        let result = ws.update_room_connection_type(&conn.id, "magical");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_room_map_position() {
+        let (ws, _dir) = open_temp_ws();
+        let rooms = ws.list_rooms().unwrap();
+        let room = &rooms[0];
+        ws.update_room_map_position(&room.id, 120.0, 80.0).unwrap();
+        let rooms2 = ws.list_rooms().unwrap();
+        assert!((rooms2[0].map_x - 120.0).abs() < 0.001);
+        assert!((rooms2[0].map_y - 80.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn missing_room_reference_in_connections_does_not_panic() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        // list_connections_for_room with a non-existent room just returns empty
+        let result = ws.list_connections_for_room("nonexistent-room-id");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn room_total_note_count() {
+        let (ws, _dir) = open_temp_ws();
+        let room = ws.list_rooms().unwrap().into_iter().next().unwrap();
+        assert_eq!(ws.room_total_note_count(&room.id), 0);
+        ws.create_loose_note(&room.id).unwrap();
+        assert_eq!(ws.room_total_note_count(&room.id), 1);
+    }
+
+    #[test]
+    fn room_container_count() {
+        let (ws, _dir) = open_temp_ws();
+        let room = ws.list_rooms().unwrap().into_iter().next().unwrap();
+        assert_eq!(ws.room_container_count(&room.id), 0);
+        ws.create_container(&room.id, "My Shelf", ContainerKind::Shelf)
+            .unwrap();
+        assert_eq!(ws.room_container_count(&room.id), 1);
+        ws.create_container(&room.id, "My Pile", ContainerKind::Pile)
+            .unwrap();
+        assert_eq!(ws.room_container_count(&room.id), 2);
+    }
+
+    #[test]
+    fn connection_is_undirected() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let c1 = ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        // Creating in the reverse direction should return the same existing connection
+        let c2 = ws.create_room_connection(&r2.id, &r1.id, "normal").unwrap();
+        assert_eq!(c1.id, c2.id);
+        let conns = ws.list_room_connections().unwrap();
+        assert_eq!(conns.len(), 1);
+    }
+
+    #[test]
+    fn all_three_connection_types_accepted() {
+        let (ws, _dir) = open_temp_ws();
+        let r1 = ws.create_room("Room A").unwrap();
+        let r2 = ws.create_room("Room B").unwrap();
+        let r3 = ws.create_room("Room C").unwrap();
+        ws.create_room_connection(&r1.id, &r2.id, "normal").unwrap();
+        ws.create_room_connection(&r1.id, &r3.id, "strong").unwrap();
+        ws.create_room_connection(&r2.id, &r3.id, "weak").unwrap();
+        let conns = ws.list_room_connections().unwrap();
+        assert_eq!(conns.len(), 3);
+    }
+
+    // ── Version snapshot tests ─────────────────────────────────────────────────
+
+    fn sample_ws_note(ws: &WorkspaceDb) -> WorkspaceNote {
+        let room = ws.list_rooms().unwrap().into_iter().next().unwrap();
+        let mut note = ws.create_loose_note(&room.id).unwrap();
+        note.title = "Test Note".to_string();
+        note.body = "Hello workspace".to_string();
+        ws.upsert_note(&note).unwrap();
+        note
+    }
+
+    #[test]
+    fn create_and_list_note_versions() {
+        let (ws, _dir) = open_temp_ws();
+        let note = sample_ws_note(&ws);
+
+        ws.create_note_version(&note, "before merge", false, None, None, None)
+            .unwrap();
+        ws.create_note_version(
+            &note,
+            "manual",
+            true,
+            Some("Checkpoint"),
+            Some("manual"),
+            None,
+        )
+        .unwrap();
+
+        let versions = ws.list_note_versions(&note.id).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].bookmark_name.as_deref(), Some("Checkpoint"));
+    }
+
+    #[test]
+    fn get_note_version_by_id() {
+        let (ws, _dir) = open_temp_ws();
+        let note = sample_ws_note(&ws);
+        let v = ws
+            .create_note_version(&note, "snap", false, None, None, None)
+            .unwrap();
+
+        let fetched = ws.get_note_version(&v.id).unwrap().unwrap();
+        assert_eq!(fetched.id, v.id);
+        assert_eq!(fetched.note_id, note.id);
+    }
+
+    #[test]
+    fn get_note_version_missing_returns_none() {
+        let (ws, _dir) = open_temp_ws();
+        assert!(ws.get_note_version("ghost").unwrap().is_none());
+    }
+
+    #[test]
+    fn archive_as_merged_archives_ws_note() {
+        let (ws, _dir) = open_temp_ws();
+        let note = sample_ws_note(&ws);
+        ws.archive_as_merged(&note.id, "other-note-id").unwrap();
+
+        let loaded = ws.get_note(&note.id).unwrap().unwrap();
+        assert!(loaded.is_archived);
+    }
+
+    #[test]
+    fn archive_as_merged_nonexistent_errors() {
+        let (ws, _dir) = open_temp_ws();
+        assert!(ws.archive_as_merged("ghost", "target").is_err());
     }
 
     #[test]

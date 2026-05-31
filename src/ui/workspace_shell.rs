@@ -498,6 +498,17 @@ impl WorkspaceShell {
         self.update_breadcrumb();
     }
 
+    /// Navigate to a specific room from Room Map Mode.
+    /// Refreshes the workspace view and selects the room.
+    pub fn navigate_to_room(&self, room_id: &str) {
+        // If the room list is empty (workspace just opened), do a full refresh first.
+        let has_rooms = self.room_list.first_child().is_some();
+        if !has_rooms {
+            self.refresh();
+        }
+        self.select_room(room_id);
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────
 
     fn clear_room_list(&self) {

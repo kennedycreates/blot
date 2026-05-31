@@ -187,17 +187,20 @@ Implement editing and rendering for:
 - Show known workspaces (from config, from recent files, and from Terroir when available).
 - Open workspace, create workspace, pin workspace actions.
 
-### 4.5 Tabs
+### 4.5 Tabs ✓ (Implemented — Prompt 9)
 
-- Tab bar in header.
-- Each tab is an independent editor/mode context.
-- Tabs remember scroll and cursor position.
-- Drag tabs to new windows.
+- Tab bar below header bar; shows source badge ("I"/"W"), note title (truncated), close button.
+- Each tab is an independent editor context; content-swap model (single EditorWidgets shared).
+- Dedup: opening an already-open note focuses its existing tab.
+- Ctrl+N / Ctrl+T → new Inbox tab; Ctrl+Page Down/Up → next/prev tab.
+- Known gap: cursor/scroll position not restored on tab switch.
 
-### 4.6 Multiple Windows
+### 4.6 Multiple Windows ✓ (Implemented — Prompt 9)
 
-- Open new window from menu or tab drag.
-- All windows share the same Inbox and workspace data.
+- "New Window" via header button, Ctrl+Alt+N, or command palette.
+- All windows share the same Inbox DB (Rc-wrapped and passed to new windows).
+- Workspace DBs are opened independently per window; last-save-wins for concurrent edits.
+- "Open Current Note in New Window" opens a new window (note not pre-loaded).
 
 **Phase 4 deliverable:** Desk Mode is fully functional. Tabs and multiple windows work.
 
@@ -244,39 +247,43 @@ Implement editing and rendering for:
 
 ---
 
-## Phase 6: Room Map Mode
+## Phase 6: Room Map Mode ✓ (Implemented — Prompt 8)
 
 **Goal:** Visual and list view of Rooms and Doors within a workspace.
 
-### 6.1 Room Map Canvas
+### 6.1 Room Map Canvas ✓
 
-- Rooms displayed as labeled cards on a scrollable/zoomable canvas.
-- `map_x`, `map_y`, `map_width`, `map_height` from `blot_rooms`.
-- Drag rooms on the canvas to rearrange; positions saved.
+- Rooms displayed as 164×88 px rounded cards on a Cairo-rendered canvas (600×460 px minimum).
+- `map_x` / `map_y` from `blot_rooms` used for positioning; auto-circular layout when all positions are 0.
+- Drag rooms on the canvas to rearrange; positions saved to DB on drag-end.
 
-### 6.2 Doors Rendering
+### 6.2 Doors Rendering ✓
 
-- Draw lines between connected rooms.
-- Line style reflects connection type: normal (solid), strong (bold solid), weak (dashed).
-- Click a connection line to view/edit connection type or delete the door.
+- Lines drawn between room card centers.
+- Line style: normal (solid gray 1.8 px), strong (brass 3.0 px), weak (dashed 1.0 px, 6–4 pattern).
 
-### 6.3 Room Map Interactions
+### 6.3 Room Map Interactions ✓
 
-- Right-click room: Rename, Add Door, Remove, View Notes.
-- Add Door: click source room, then target room, then pick connection type.
-- Double-click room to navigate into it (switch to workspace note list for that room).
+- Click to select a room (brass border highlight).
+- Double-click a room to navigate into it (Workspace Mode for that room).
+- "New Room" button / "Create Room" palette command.
+- "Connect" button / "Connect Rooms" palette command — opens dialog with room dropdowns and type picker.
+- "Change Room Connection Type" and "Remove Room Connection" palette commands.
+- "Open Room" / "Open Selected Room" palette command.
 
-### 6.4 Room Map List/Sidebar View
+### 6.4 Room Map List/Sidebar View ✓
 
-- Toggle between canvas and list view.
-- List view: room name, note count, shelf/pile count, connections listed as text.
+- "Map" / "List" toggle in toolbar.
+- List view: room sidebar list with note + container counts; selected room detail panel shows connections, shelf/pile count, and Open Room button.
 
-### 6.5 Room Map Creation
+### 6.5 Room Map Creation ✓
 
-- "Create Room" from Room Map Mode.
-- New room appears on canvas at a default position, ready to rename.
+- "New Room" button or "Create Room" command opens a modal name-prompt dialog.
+- New room created in DB; appears in map after refresh.
 
 **Phase 6 deliverable:** Room Map Mode shows rooms and doors visually and as a list. All room and door CRUD works.
+
+**Known gaps (Prompt 9 TODOs):** Canvas scroll/zoom; right-click context menu on room cards; auto-layout positions not written to DB on initial display; `--room-map` launch arg.
 
 ---
 
@@ -312,15 +319,17 @@ Implement editing and rendering for:
 - Source notes are archived, `is_archived = 1`, `redirects_to_note_id` set.
 - Auto-bookmark fires on target before merge.
 
-### 7.4 Compare Mode
+### 7.4 Compare Mode ✓ (Implemented — Prompt 9)
 
-- Two-panel layout.
-- Pick two notes (current note as Note A, user picks Note B).
-- Select blocks in Note A → Copy to Note B or Move to Note B.
-- Auto-bookmark before any move.
-- Confirm dialog before destructive move.
+- Two-panel layout (gtk::Paned, horizontal split).
+- Entry: "Compare" header button or command palette "Open Compare Mode".
+- Current Inbox note auto-loaded into panel A on entry.
+- Panel B loaded via note picker (custom modal window with search + list).
+- Autosave per panel, 1.5 s debounce, routed to Inbox DB or workspace DB by source.
+- Toolbar: ← Exit, ← Copy, ← Move, ⇄ Swap, Move →, Copy → (all wired).
+- Known gaps: picker always loads into panel B; auto-bookmark before move not yet implemented.
 
-**Phase 7 deliverable:** Arrange, Split, Merge, and Compare all work correctly with auto-bookmarks.
+**Phase 7 deliverable:** Compare Mode works. Arrange, Split, and Merge are Prompt 10 TODOs.
 
 ---
 

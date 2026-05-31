@@ -1,8 +1,7 @@
 use gtk::prelude::*;
 
 /// All commands available in the command palette.
-/// In this skeleton each command logs to stderr and updates the status label.
-/// Real implementations are wired in later prompts.
+/// Commands that are implemented log stderr; real dispatch happens via callbacks.
 pub const COMMANDS: &[&str] = &[
     // ── Desk ──────────────────────────────────────────────────────────────
     "Open Desk",
@@ -15,12 +14,23 @@ pub const COMMANDS: &[&str] = &[
     "Search",
     "Search All Workspaces",
     "Open Room Map",
-    // ── Note creation ─────────────────────────────────────────────────────
+    // ── Room Map ──────────────────────────────────────────────────────────
+    "Create Room",
+    "Connect Rooms",
+    "Change Room Connection Type",
+    "Remove Room Connection",
+    "Open Selected Room",
+    // ── Tabs and windows ───────────────────────────────────────────────────
     "New Inbox Note",
     "New Workspace Note",
+    "Close Tab",
+    "Next Tab",
+    "Previous Tab",
+    "Open Current Note in New Window",
+    "New Window",
+    // ── Note creation ─────────────────────────────────────────────────────
     "Place Note",
     // ── Workspace organization ─────────────────────────────────────────────
-    "Create Room",
     "Create Shelf",
     "Create Pile",
     "Convert Pile to Shelf",
@@ -45,10 +55,15 @@ pub const COMMANDS: &[&str] = &[
 /// Open the command palette as a modal window centered over `parent`.
 /// `status_label` is updated with the last selected command name.
 /// `on_place_note` is called when the user activates "Place Note".
+/// `on_room_map_cmd` is called with the command name for Room Map commands.
+/// `on_general_cmd` is called for all other wired commands (tabs, windows,
+/// compare mode, etc.).
 pub fn open(
     parent: &gtk::ApplicationWindow,
     status_label: &gtk::Label,
     on_place_note: Option<std::rc::Rc<dyn Fn()>>,
+    on_room_map_cmd: Option<std::rc::Rc<dyn Fn(&str)>>,
+    on_general_cmd: Option<std::rc::Rc<dyn Fn(&str)>>,
 ) {
     let dialog = gtk::Window::builder()
         .transient_for(parent)
@@ -142,8 +157,16 @@ pub fn open(
     let dialog_for_list = dialog.clone();
     let status_for_list = status_label.clone();
     let place_for_list = on_place_note.clone();
+    let room_map_for_list = on_room_map_cmd.clone();
+    let general_for_list = on_general_cmd.clone();
     list.connect_row_activated(move |_, row| {
-        activate_command(row, &status_for_list, place_for_list.as_deref());
+        activate_command(
+            row,
+            &status_for_list,
+            place_for_list.as_deref(),
+            room_map_for_list.as_deref(),
+            general_for_list.as_deref(),
+        );
         dialog_for_list.close();
     });
 
@@ -154,6 +177,8 @@ pub fn open(
     let dialog_for_key = dialog.clone();
     let status_for_key = status_label.clone();
     let place_for_key = on_place_note.clone();
+    let room_map_for_key = on_room_map_cmd.clone();
+    let general_for_key = on_general_cmd.clone();
     key_ctrl.connect_key_pressed(move |_, key, _, _| match key {
         gtk::gdk::Key::Escape => {
             dialog_for_key.close();
@@ -161,7 +186,13 @@ pub fn open(
         }
         gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
             if let Some(row) = list_for_key.selected_row() {
-                activate_command(&row, &status_for_key, place_for_key.as_deref());
+                activate_command(
+                    &row,
+                    &status_for_key,
+                    place_for_key.as_deref(),
+                    room_map_for_key.as_deref(),
+                    general_for_key.as_deref(),
+                );
                 dialog_for_key.close();
             }
             glib::Propagation::Stop
@@ -184,10 +215,36 @@ pub fn open(
     dialog.present();
 }
 
+const ROOM_MAP_COMMANDS: &[&str] = &[
+    "Create Room",
+    "Connect Rooms",
+    "Change Room Connection Type",
+    "Remove Room Connection",
+    "Open Selected Room",
+    "Open Room Map",
+];
+
+const GENERAL_COMMANDS: &[&str] = &[
+    "New Inbox Note",
+    "New Workspace Note",
+    "Close Tab",
+    "Next Tab",
+    "Previous Tab",
+    "Open Current Note in New Window",
+    "New Window",
+    "Open Compare Mode",
+    "Split Note",
+    "Merge Notes",
+    "Bookmark Version",
+    "Show Version History",
+];
+
 fn activate_command(
     row: &gtk::ListBoxRow,
     status_label: &gtk::Label,
     on_place_note: Option<&dyn Fn()>,
+    on_room_map_cmd: Option<&dyn Fn(&str)>,
+    on_general_cmd: Option<&dyn Fn(&str)>,
 ) {
     let Some(label) = row.child().and_then(|w| w.downcast::<gtk::Label>().ok()) else {
         return;
@@ -199,6 +256,24 @@ fn activate_command(
     if cmd == "Place Note" {
         if let Some(f) = on_place_note {
             f();
+        }
+        return;
+    }
+
+    if ROOM_MAP_COMMANDS.contains(&cmd.as_str()) {
+        if let Some(f) = on_room_map_cmd {
+            f(&cmd);
+        } else {
+            eprintln!("blot: room map command '{cmd}' — open Room Map first");
+        }
+        return;
+    }
+
+    if GENERAL_COMMANDS.contains(&cmd.as_str()) {
+        if let Some(f) = on_general_cmd {
+            f(&cmd);
+        } else {
+            eprintln!("blot: command '{cmd}' — handler not available in this context");
         }
     }
 }
