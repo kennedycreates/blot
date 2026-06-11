@@ -298,7 +298,7 @@ impl WorkspaceShell {
                     editor_save_label.set_text("Source view");
                 } else {
                     btn.set_label("Source");
-                    editor_save_label.set_text("Unsaved");
+                    super::set_save_status(&editor_save_label, "Unsaved");
                 }
             });
         }
@@ -314,8 +314,8 @@ impl WorkspaceShell {
                 }
                 hint_label.set_visible(buf.char_count() == 0);
                 shell2.ws_session.borrow_mut().dirty = true;
-                shell2.editor_save_label.set_text("Unsaved");
-                shell2.status_save_label.set_text("Unsaved");
+                super::set_save_status(&shell2.editor_save_label, "Unsaved");
+                super::set_save_status(&shell2.status_save_label, "Unsaved");
 
                 if let Some(id) = shell2.pending_timer.borrow_mut().take() {
                     id.remove();
@@ -493,8 +493,8 @@ impl WorkspaceShell {
             s.dirty = false;
         }
 
-        self.editor_save_label.set_text("Opened");
-        self.status_save_label.set_text("Opened");
+        super::set_save_status(&self.editor_save_label, "Opened");
+        super::set_save_status(&self.status_save_label, "Opened");
         self.update_breadcrumb();
     }
 
@@ -1011,7 +1011,7 @@ impl WorkspaceShell {
                 self.pending_timer.borrow_mut().take();
                 return;
             }
-            self.editor_save_label.set_text("Blank");
+            super::set_save_status(&self.editor_save_label, "Blank");
             self.pending_timer.borrow_mut().take();
             return;
         }
@@ -1094,13 +1094,13 @@ impl WorkspaceShell {
                     s.dirty = false;
                 }
                 self.pending_timer.borrow_mut().take();
-                self.editor_save_label.set_text("Saved");
-                self.status_save_label.set_text("Saved");
+                super::set_save_status(&self.editor_save_label, "Saved");
+                super::set_save_status(&self.status_save_label, "Saved");
             }
             Some(Err(e)) => {
                 eprintln!("blot: workspace autosave error: {e}");
-                self.editor_save_label.set_text("Save error");
-                self.status_save_label.set_text("Save error");
+                super::set_save_status(&self.editor_save_label, "Save error");
+                super::set_save_status(&self.status_save_label, "Save error");
             }
             None => {
                 self.editor_save_label.set_text("No workspace");

@@ -1,5 +1,6 @@
 //! Merge Notes dialog: lets the user pick inbox notes to merge into the current note.
 
+use super::modal_host::{self, ButtonKind, ModalHost};
 use crate::inbox::{format_date_short, InboxDb, InboxNote};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -9,7 +10,7 @@ use std::rc::Rc;
 /// The user selects source notes to merge into `target_note_id`.
 /// `on_merge(source_ids)` is called with the IDs of notes to merge in.
 pub fn open_inbox(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     db: Rc<RefCell<Option<InboxDb>>>,
     target_note_id: &str,
     on_merge: impl Fn(Vec<String>) + 'static,
@@ -23,26 +24,15 @@ pub fn open_inbox(
         .filter(|n| n.id != target_note_id)
         .collect();
 
-    let dialog = gtk::Window::builder()
-        .transient_for(parent)
-        .modal(true)
-        .title("Merge Notes")
-        .default_width(480)
-        .default_height(400)
-        .resizable(true)
-        .build();
-    dialog.add_css_class("merge-dialog-window");
-
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.add_css_class("merge-dialog-window");
+    vbox.set_size_request(460, 380);
 
     let hint = gtk::Label::new(Some(
         "Select notes to merge into the current note. Selected notes will be archived.",
     ));
     hint.add_css_class("merge-hint");
-    hint.set_margin_top(14);
     hint.set_margin_bottom(8);
-    hint.set_margin_start(14);
-    hint.set_margin_end(14);
     hint.set_wrap(true);
     hint.set_halign(gtk::Align::Start);
 
@@ -52,6 +42,7 @@ pub fn open_inbox(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+    scroll.set_margin_top(8);
 
     let list = gtk::ListBox::new();
     list.add_css_class("merge-note-list");
@@ -120,36 +111,26 @@ pub fn open_inbox(
 
     scroll.set_child(Some(&list));
 
-    let btn_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    btn_bar.set_halign(gtk::Align::End);
-    btn_bar.set_margin_top(8);
-    btn_bar.set_margin_bottom(12);
-    btn_bar.set_margin_end(12);
-
-    let cancel_btn = gtk::Button::with_label("Cancel");
-    let merge_btn = gtk::Button::with_label("Merge");
-    merge_btn.add_css_class("suggested-action");
-
-    btn_bar.append(&cancel_btn);
-    btn_bar.append(&merge_btn);
-
     vbox.append(&hint);
     vbox.append(&sep);
     vbox.append(&scroll);
-    vbox.append(&btn_bar);
-    dialog.set_child(Some(&vbox));
 
-    let dialog_c = dialog.clone();
-    cancel_btn.connect_clicked(move |_| dialog_c.close());
+    let actions = modal_host::build_modal_actions();
 
-    let dialog_m = dialog.clone();
-    merge_btn.connect_clicked(move |_| {
+    let host_c = host.clone();
+    let cancel_btn =
+        modal_host::build_modal_button("Cancel", ButtonKind::Secondary, move || host_c.hide());
+    actions.append(&cancel_btn);
+
+    let host_m = host.clone();
+    let merge_btn = modal_host::build_modal_button("Merge", ButtonKind::Primary, move || {
         let ids: Vec<String> = checked.borrow().iter().cloned().collect();
         if !ids.is_empty() {
             on_merge(ids);
         }
-        dialog_m.close();
+        host_m.hide();
     });
+    actions.append(&merge_btn);
 
-    dialog.present();
+    host.show_with_custom_ui("Merge Notes", &vbox, &actions, true, None);
 }

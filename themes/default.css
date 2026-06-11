@@ -28,18 +28,33 @@ separator {
 }
 
 scrollbar {
-    background-color: transparent;
+    background: transparent;
+    border: none;
+}
+
+scrollbar trough {
+    background: transparent;
+    border: none;
+    padding: 0;
 }
 
 scrollbar slider {
-    background-color: #363330;
+    background: rgba(184, 158, 120, 0.18);
+    border: none;
     border-radius: 4px;
     min-width: 6px;
-    min-height: 6px;
+    min-height: 20px;
+    margin: 1px;
+    transition: background 140ms ease, box-shadow 140ms ease;
 }
 
 scrollbar slider:hover {
-    background-color: #4a433c;
+    background: rgba(201, 150, 46, 0.50);
+    box-shadow: 0 0 6px rgba(201, 150, 46, 0.28);
+}
+
+scrollbar slider:active {
+    background: rgba(216, 185, 124, 0.66);
 }
 
 /* Header bar */
@@ -74,6 +89,8 @@ headerbar button,
     min-height: 24px;
     padding: 3px 7px;
     box-shadow: none;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease,
+                box-shadow 140ms ease;
 }
 
 headerbar button:hover,
@@ -172,6 +189,8 @@ headerbar windowcontrols button {
     color: #b89e78;
     box-shadow: 0 1px 2px #00000025, inset 0 1px 0 0 #c9962e0d;
     min-height: 0;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease,
+                box-shadow 140ms ease;
 }
 
 .source-toggle-btn,
@@ -231,6 +250,7 @@ searchentry {
     color: #e8dcc8;
     caret-color: #c9962e;
     padding: 4px 10px;
+    transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
 entry:focus,
@@ -373,6 +393,8 @@ searchentry placeholder {
     border-radius: 4px;
     color: #b89e78;
     margin: 1px 6px;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease,
+                box-shadow 140ms ease;
 }
 
 .command-palette-list row:hover {
@@ -384,6 +406,7 @@ searchentry placeholder {
     background: linear-gradient(90deg, #c8407018 0%, #c9962e08 55%, transparent 90%);
     border-color: #c8407048;
     color: #e8dcc8;
+    box-shadow: 0 0 0 1px #c8407024, 0 0 14px #c8407012;
 }
 
 .command-palette-list row label {
@@ -462,6 +485,8 @@ searchentry placeholder {
     color: #e8dcc8;
     margin: 2px 12px;
     box-shadow: 0 1px 2px #00000030, inset 0 1px 0 0 #c9962e0c;
+    transition: background 140ms ease, border-color 140ms ease,
+                box-shadow 140ms ease;
 }
 
 .desk-note-card {
@@ -586,6 +611,7 @@ searchentry placeholder {
     border: 1px solid transparent;
     border-radius: 0;
     color: #b89e78;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .workspace-room-list row:hover,
@@ -735,6 +761,7 @@ button.suggested-action:hover {
     padding: 2px 10px;
     min-height: 0;
     min-width: 0;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .scope-chip:hover,
@@ -769,6 +796,7 @@ button.suggested-action:hover {
 
 .search-result-row {
     background: transparent;
+    transition: background 140ms ease, box-shadow 140ms ease;
 }
 
 .search-result-row:hover {
@@ -777,6 +805,7 @@ button.suggested-action:hover {
 
 .search-result-row:selected {
     background: #2a2419;
+    box-shadow: inset 2px 0 0 0 #c9962e80;
 }
 
 .search-result-card {
@@ -836,6 +865,7 @@ button.suggested-action:hover {
     padding: 2px 8px;
     min-height: 0;
     min-width: 0;
+    transition: border-color 140ms ease, color 140ms ease;
 }
 
 .result-open-btn:hover {
@@ -847,4 +877,302 @@ button.suggested-action:hover {
     color: #504840;
     font-size: 14px;
     line-height: 1.6;
+}
+
+/* External file mode + Absorb into Blot (Prompt 11) */
+
+.external-file-banner {
+    background-color: #241a10;
+    border: 1px solid #5f4220;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+
+.external-file-banner-label {
+    color: #e0c089;
+    font-size: 13px;
+}
+
+.absorb-dialog {
+    background: linear-gradient(180deg, #1c1519 0%, #171513 100%);
+}
+
+.absorb-heading {
+    color: #e8dcc8;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.absorb-section-label {
+    color: #b89e78;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.absorb-warning {
+    color: #e0a85a;
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+    background: linear-gradient(180deg, #1a1816 0%, #161412 100%);
+    border-bottom: 1px solid #302e28;
+    padding: 2px 4px;
+}
+
+.tab-item {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    margin: 2px 1px;
+    padding: 1px 2px;
+    transition: background 140ms ease, border-color 140ms ease,
+                box-shadow 140ms ease;
+}
+
+.tab-item:hover {
+    background: linear-gradient(180deg, #252320 0%, #211f1d 100%);
+    border-color: #302e28;
+}
+
+.tab-item-active {
+    background: linear-gradient(180deg, #292223 0%, #232120 100%);
+    border-color: #c8407048;
+    box-shadow: inset 0 -2px 0 0 #c84070, 0 1px 2px #00000030;
+}
+
+.tab-title-btn,
+.tab-close-btn,
+.tab-new-btn {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: #b89e78;
+    padding: 2px 6px;
+    transition: color 140ms ease, background 140ms ease;
+}
+
+.tab-item-active .tab-title-label {
+    color: #e8dcc8;
+}
+
+.tab-close-btn {
+    color: #806040;
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+
+.tab-close-btn:hover {
+    color: #e06878;
+    background: #2a1d20;
+}
+
+.tab-new-btn:hover {
+    color: #d9ae4e;
+}
+
+.tab-badge {
+    color: #5080b8;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+/* ── Motion vocabulary ────────────────────────────────────────────────────── */
+
+@keyframes blot-card-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+.blot-card-anim {
+    animation: blot-card-in 200ms ease-out both;
+}
+
+@keyframes blot-list-row-in {
+    from { opacity: 0; transform: translateX(-6px); }
+    to   { opacity: 1; transform: translateX(0);    }
+}
+
+.blot-row-anim {
+    animation: blot-list-row-in 160ms ease-out both;
+}
+
+/* Staggered entrance delays — applied to the first several rows so a fresh
+   list cascades in instead of snapping. */
+.blot-delay-0 { animation-delay:   0ms; }
+.blot-delay-1 { animation-delay:  22ms; }
+.blot-delay-2 { animation-delay:  44ms; }
+.blot-delay-3 { animation-delay:  66ms; }
+.blot-delay-4 { animation-delay:  88ms; }
+.blot-delay-5 { animation-delay: 110ms; }
+.blot-delay-6 { animation-delay: 132ms; }
+.blot-delay-7 { animation-delay: 154ms; }
+
+/* ── Save-status feedback ─────────────────────────────────────────────────── */
+
+.status-unsaved {
+    color: #c08a3a;
+}
+
+@keyframes blot-save-flash {
+    from { color: #d9ae4e; text-shadow: 0 0 8px #c9962e66; }
+    to   { color: #806040; text-shadow: none; }
+}
+
+.status-saved {
+    color: #806040;
+    animation: blot-save-flash 600ms ease-out;
+}
+
+/* ── In-window modal system ───────────────────────────────────────────────── */
+
+.dialog-prompt {
+    color: #d2b085;
+}
+
+.dialog-entry {
+    background-color: #0c0b0a;
+    border: 1px solid #302e28;
+    border-radius: 8px;
+    color: #e8dcc8;
+    caret-color: #c9962e;
+    min-height: 34px;
+    min-width: 420px;
+    padding: 6px 10px;
+    box-shadow: inset 0 1px 0 0 #c840700c;
+    transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.dialog-entry:focus {
+    border-color: #c8407058;
+    box-shadow: 0 0 0 2px #c8407016;
+}
+
+.modal-layer {
+    /* Full-window overlay layer container — no background, just a layout shell */
+}
+
+.modal-scrim {
+    background-color: rgba(8, 7, 6, 0.68);
+}
+
+.modal-panel {
+    background: linear-gradient(180deg, #201d1a 0%, #1c1a17 100%);
+    border: 1px solid #4a4032;
+    border-radius: 12px;
+    box-shadow:
+        0 0 0 1px #c9962e18,
+        0 24px 64px rgba(0, 0, 0, 0.72),
+        0  8px 24px rgba(0, 0, 0, 0.50);
+    min-width: 440px;
+    padding: 0;
+}
+
+.modal-title-row {
+    padding: 18px 20px 14px 20px;
+}
+
+.modal-title {
+    color: #e8dcc8;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    letter-spacing: 0.4px;
+}
+
+.modal-title-sep,
+.modal-actions-sep {
+    background-color: #302e28;
+    min-height: 1px;
+    margin: 0;
+}
+
+.modal-content,
+.modal-input-content,
+.modal-confirm-content,
+.modal-error-content {
+    padding: 18px 20px 12px 20px;
+}
+
+.modal-actions-wrapper {
+    padding: 12px 16px;
+}
+
+.modal-actions {
+    padding: 0;
+}
+
+.modal-primary-button {
+    background: linear-gradient(180deg, #c9962e22 0%, #c9962e14 100%);
+    border: 1px solid #c9962e80;
+    border-radius: 6px;
+    color: #e8c870;
+    padding: 6px 18px;
+    font-size: 13px;
+    min-height: 32px;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+
+.modal-primary-button:hover {
+    background: linear-gradient(180deg, #c9962e38 0%, #c9962e22 100%);
+    border-color: #c9962e;
+}
+
+.modal-primary-button:active {
+    background: #c9962e28;
+    border-color: #c9962e;
+}
+
+.modal-primary-button:disabled {
+    background: transparent;
+    border-color: #302e28;
+    color: #504840;
+}
+
+.modal-danger-button {
+    background: linear-gradient(180deg, #c8407018 0%, #c8407010 100%);
+    border: 1px solid #c8407070;
+    border-radius: 6px;
+    color: #e06878;
+    padding: 6px 18px;
+    font-size: 13px;
+    min-height: 32px;
+    transition: background 120ms ease, border-color 120ms ease;
+}
+
+.modal-danger-button:hover {
+    background: linear-gradient(180deg, #c8407030 0%, #c8407018 100%);
+    border-color: #c84070;
+}
+
+.modal-danger-button:active {
+    background: #c8407028;
+    border-color: #c84070;
+}
+
+.modal-secondary-button {
+    background: #252320;
+    border: 1px solid #302e28;
+    border-radius: 6px;
+    color: #806040;
+    padding: 6px 16px;
+    font-size: 13px;
+    min-height: 32px;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.modal-secondary-button:hover {
+    background: #2e2b27;
+    border-color: #403c36;
+    color: #b89e78;
+}
+
+.modal-secondary-button:active {
+    background: #1c1a17;
+    border-color: #302e28;
 }

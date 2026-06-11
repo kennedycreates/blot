@@ -50,14 +50,76 @@ cargo run            # run dev build
 ```
 blot                                    Open to blank Inbox note (default)
 blot <path.water>                       Open .water workspace, switch to Workspace Mode
+blot <path.txt|.md|.markdown|.text>     Open a plain text / Markdown file as an External File
 blot --inbox                            Open Desk / Inbox list view
 blot --workspace <path.water>           Open a specific workspace
+blot --file <path>                      Open a plain text / Markdown file explicitly
 blot --search "query"                   Open in Search Mode with query prefilled
 blot --room-map                         Open in Room Map Mode (stub)
 blot --new-workspace-note <path.water>  Open workspace and start a new Loose Note
 ```
 
-If the workspace file does not exist at the given path, Blot logs an error and opens the Inbox instead (no panic).
+If the workspace file does not exist at the given path, Blot logs an error and opens the Inbox instead (no panic). A positional argument with a supported text/Markdown extension opens as an External File; anything else is treated as a `.water` workspace path.
+
+---
+
+## External Files and Absorb into Blot (Prompt 11)
+
+Blot can open ordinary plain-text and Markdown files directly, edit them, and
+optionally **absorb** them into its structured note system — a key part of
+Blot's job of reducing scattered text-file clutter.
+
+**Supported types:** `.txt`, `.md`, `.markdown`, `.text`. Deliberately
+unsupported: `.docx`, `.odt`, `.rtf`, `.pdf`, `.html`, web clippings, binary
+files (rejected with a clear message).
+
+**External file state** is a distinct note kind, separate from Inbox notes and
+workspace notes. An open external file:
+
+- shows the location **External File** and a banner offering
+  *Keep Editing as File · Absorb into Blot · Dismiss*;
+- loads its text into the editor and generates structured document JSON for
+  internal editing behavior;
+- uses the file name as its initial title;
+- does **not** appear in the Inbox, in any workspace, or in the search index
+  until absorbed.
+
+**Saving (manual):** external files use **manual save only** — there is no disk
+autosave (this is a deliberate safety choice). Save writes the current text
+back to the original path as UTF-8, preserving the original line-ending style
+(LF / CRLF). If the file changed on disk since it was opened, Blot warns before
+overwriting. On save failure the editor content is kept. Closing the window with
+unsaved external edits prompts Save / Discard / Cancel — edits are never lost
+silently. (Inbox and workspace notes keep their existing silent autosave.)
+
+**Absorb into Blot** (banner button, the `Absorb into Blot` action, or the
+`Absorb File` command):
+
+1. Confirm the title (suggested: first heading → file stem → first line →
+   timestamp).
+2. Choose a destination — **Global Inbox** (default when no workspace is
+   focused) or **Current Workspace → Loose Notes** (suggested when a workspace
+   is open). The absorb engine also supports Shelves/Piles (covered by tests; a
+   full in-UI Room/Shelf/Pile picker is a Prompt 12 follow-up).
+3. Choose what happens to the original file — **Leave It Where It Is** (safe
+   default) or **Move to Trash** (GIO/GVfs trash; never a permanent delete).
+4. Absorbing creates a Blot note (title, body, document JSON, timestamps), an
+   auto-bookmark version (`Absorbed from file`), and a provenance record, then
+   opens the new note.
+
+If the same file path was absorbed before, the dialog warns
+("This file appears to have been absorbed before") but lets you continue — a
+new, separate note is created (no silent merge or overwrite).
+
+**Source provenance** is recorded in the Inbox DB (`absorbed_files` table) for
+every absorb regardless of destination: `source_file_path`,
+`source_file_original_name`, `source_file_original_modified_at`,
+`source_file_absorbed_at`, and the original-file action (`left` / `trashed`).
+
+**Safety guarantees:** originals are never silently deleted or trashed; external
+files are never silently overwritten when changed on disk; external files never
+autosave to disk or into the Inbox; failed reads/saves/absorbs leave the
+original file untouched and keep the editor content.
 
 ---
 
@@ -295,3 +357,23 @@ Recent entries stored in `blot_recent` with UPSERT on `(target_kind, target_id, 
 - **No Arrange Mode / Compare Mode** — future prompts.
 - **No Split / Merge** — future prompts.
 - **FTS5 search index** — `blot_search_index` is specified but not yet created. Current search uses Rust-side filtering which is fast enough for typical note counts.
+
+### Prompt 11 (external files / Absorb) limitations and TODOs
+
+- **In-UI absorb picker is Inbox / Loose Notes only.** The absorb *engine*
+  (`absorb::absorb_into_workspace`) supports Shelves and Piles and is covered by
+  tests, but the absorb dialog currently exposes only Global Inbox and Current
+  Workspace → Loose Notes. A full Room / Shelf / Pile picker (reusing Place
+  Note's destination tree) is a **Prompt 12** follow-up.
+- **External files are not yet in the tab/window model.** They open as a
+  dedicated mode and are not represented as tabs. Tab-label external-file
+  indicators and per-tab close-prompts are deferred; the window-level
+  Save/Discard/Cancel prompt protects unsaved edits in the meantime.
+- **No external files in Compare Mode yet.** Compare Mode operates on Inbox /
+  workspace notes; absorb a file first to compare it. Deferred to a later prompt.
+- **No-extension plain-text detection** (MIME sniffing) is not implemented; only
+  the listed extensions are recognized.
+- **Provenance original-action accuracy.** The recorded `original_action`
+  reflects the user's chosen Leave/Trash intent at absorb time; if a requested
+  trash later fails, the note is still created and the file is left in place
+  (the failure is surfaced), but the provenance row is not rewritten.

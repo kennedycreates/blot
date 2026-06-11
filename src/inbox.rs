@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current schema version. Increment when making incompatible changes.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 // ── Pin and Recent entries ────────────────────────────────────────────────────
 
@@ -44,6 +44,32 @@ pub struct RecentEntry {
     pub note_title: String,
     pub note_snippet: String,
     pub accessed_at: String,
+}
+
+// ── Absorbed file provenance ────────────────────────────────────────────────
+
+/// Provenance record for an external `.txt` / `.md` file that was absorbed into
+/// Blot. Stored in the Inbox DB regardless of destination so duplicate
+/// detection works across the Inbox and all workspaces.
+#[derive(Debug, Clone)]
+pub struct AbsorbedFile {
+    pub id: String,
+    /// `"inbox_note"` or `"workspace_note"`.
+    pub target_kind: String,
+    /// Note ID in the respective store.
+    pub target_id: String,
+    /// Empty string for inbox notes; absolute `.water` path otherwise.
+    pub workspace_path: String,
+    /// Absolute path of the original source file at absorb time.
+    pub source_file_path: String,
+    /// Original file name (with extension).
+    pub source_file_original_name: String,
+    /// Original file's last-modified time (ISO-8601), if known.
+    pub source_file_original_modified_at: Option<String>,
+    /// When the absorb happened (ISO-8601).
+    pub source_file_absorbed_at: String,
+    /// `"left"` (file left in place) or `"trashed"` (moved to Trash).
+    pub original_action: String,
 }
 
 // ── Inbox note ────────────────────────────────────────────────────────────────
@@ -185,6 +211,13 @@ impl InboxDb {
                  ALTER TABLE inbox_notes ADD COLUMN merged_into_workspace_path TEXT;
                  ALTER TABLE inbox_notes ADD COLUMN merged_at TEXT;",
             );
+        }
+
+        // V6 → add the absorbed-files provenance table (tracks external .txt/.md
+        // files absorbed into Blot, regardless of whether the destination was the
+        // Inbox or a workspace).
+        if version < 6 {
+            self.conn.execute_batch(SCHEMA_V6)?;
         }
 
         if version < SCHEMA_VERSION {
@@ -617,6 +650,94 @@ impl InboxDb {
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    // ── Absorbed-file provenance ───────────────────────────────────────────────
+
+    /// Record that an external file was absorbed into a note.
+    pub fn record_absorption(&self, rec: &AbsorbedFile) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO absorbed_files
+               (id, target_kind, target_id, workspace_path, source_file_path,
+                source_file_original_name, source_file_original_modified_at,
+                source_file_absorbed_at, original_action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                rec.id,
+                rec.target_kind,
+                rec.target_id,
+                rec.workspace_path,
+                rec.source_file_path,
+                rec.source_file_original_name,
+                rec.source_file_original_modified_at,
+                rec.source_file_absorbed_at,
+                rec.original_action,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Find prior absorptions of the given source file path. Used to warn about
+    /// duplicate absorbs. Newest first.
+    pub fn find_absorptions_by_source_path(&self, source_path: &str) -> Result<Vec<AbsorbedFile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, target_kind, target_id, workspace_path, source_file_path,
+                    source_file_original_name, source_file_original_modified_at,
+                    source_file_absorbed_at, original_action
+             FROM absorbed_files
+             WHERE source_file_path = ?1
+             ORDER BY source_file_absorbed_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![source_path], |row| {
+                Ok(AbsorbedFile {
+                    id: row.get(0)?,
+                    target_kind: row.get(1)?,
+                    target_id: row.get(2)?,
+                    workspace_path: row.get(3)?,
+                    source_file_path: row.get(4)?,
+                    source_file_original_name: row.get(5)?,
+                    source_file_original_modified_at: row.get(6)?,
+                    source_file_absorbed_at: row.get(7)?,
+                    original_action: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Fetch the provenance record for a given absorbed note, if any.
+    pub fn get_absorption_for_note(
+        &self,
+        target_kind: &str,
+        target_id: &str,
+    ) -> Result<Option<AbsorbedFile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, target_kind, target_id, workspace_path, source_file_path,
+                    source_file_original_name, source_file_original_modified_at,
+                    source_file_absorbed_at, original_action
+             FROM absorbed_files
+             WHERE target_kind = ?1 AND target_id = ?2
+             ORDER BY source_file_absorbed_at DESC",
+        )?;
+        let mut rows = stmt.query_map(params![target_kind, target_id], |row| {
+            Ok(AbsorbedFile {
+                id: row.get(0)?,
+                target_kind: row.get(1)?,
+                target_id: row.get(2)?,
+                workspace_path: row.get(3)?,
+                source_file_path: row.get(4)?,
+                source_file_original_name: row.get(5)?,
+                source_file_original_modified_at: row.get(6)?,
+                source_file_absorbed_at: row.get(7)?,
+                original_action: row.get(8)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
 }
 
 // ── Schema SQL ────────────────────────────────────────────────────────────────
@@ -694,6 +815,24 @@ CREATE TABLE IF NOT EXISTS inbox_note_versions (
 
 CREATE INDEX IF NOT EXISTS idx_inbox_note_versions_note
     ON inbox_note_versions(note_id, created_at DESC);
+";
+
+/// V6 migration: provenance for external files absorbed into Blot.
+const SCHEMA_V6: &str = "
+CREATE TABLE IF NOT EXISTS absorbed_files (
+    id                               TEXT NOT NULL PRIMARY KEY,
+    target_kind                      TEXT NOT NULL,
+    target_id                        TEXT NOT NULL,
+    workspace_path                   TEXT NOT NULL DEFAULT '',
+    source_file_path                 TEXT NOT NULL,
+    source_file_original_name        TEXT NOT NULL DEFAULT '',
+    source_file_original_modified_at TEXT,
+    source_file_absorbed_at          TEXT NOT NULL,
+    original_action                  TEXT NOT NULL DEFAULT 'left'
+);
+
+CREATE INDEX IF NOT EXISTS idx_absorbed_files_source
+    ON absorbed_files(source_file_path);
 ";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1125,5 +1264,74 @@ mod tests {
         assert!(db
             .archive_as_merged("ghost", "inbox_note", "n2", "")
             .is_err());
+    }
+
+    // ── Absorbed-file provenance tests ──────────────────────────────────────────
+
+    fn sample_absorbed(source_path: &str, kind: &str, target: &str) -> AbsorbedFile {
+        AbsorbedFile {
+            id: new_note_id(),
+            target_kind: kind.to_string(),
+            target_id: target.to_string(),
+            workspace_path: String::new(),
+            source_file_path: source_path.to_string(),
+            source_file_original_name: "note.txt".to_string(),
+            source_file_original_modified_at: Some("2026-01-01T00:00:00Z".to_string()),
+            source_file_absorbed_at: "2026-06-01T00:00:00Z".to_string(),
+            original_action: "left".to_string(),
+        }
+    }
+
+    #[test]
+    fn record_and_find_absorption() {
+        let db = open_temp_db();
+        db.record_absorption(&sample_absorbed("/home/u/note.txt", "inbox_note", "n1"))
+            .unwrap();
+
+        let found = db
+            .find_absorptions_by_source_path("/home/u/note.txt")
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].target_kind, "inbox_note");
+        assert_eq!(found[0].target_id, "n1");
+        assert_eq!(found[0].original_action, "left");
+    }
+
+    #[test]
+    fn find_absorption_for_unknown_path_is_empty() {
+        let db = open_temp_db();
+        assert!(db
+            .find_absorptions_by_source_path("/nope.txt")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn duplicate_absorption_detectable() {
+        let db = open_temp_db();
+        db.record_absorption(&sample_absorbed("/x/dup.md", "inbox_note", "n1"))
+            .unwrap();
+        db.record_absorption(&sample_absorbed("/x/dup.md", "workspace_note", "wn1"))
+            .unwrap();
+        let found = db.find_absorptions_by_source_path("/x/dup.md").unwrap();
+        assert_eq!(
+            found.len(),
+            2,
+            "both absorptions of the same file are tracked"
+        );
+    }
+
+    #[test]
+    fn get_absorption_for_note_returns_record() {
+        let db = open_temp_db();
+        db.record_absorption(&sample_absorbed("/x/a.txt", "inbox_note", "n1"))
+            .unwrap();
+        let rec = db.get_absorption_for_note("inbox_note", "n1").unwrap();
+        assert!(rec.is_some());
+        assert_eq!(rec.unwrap().source_file_path, "/x/a.txt");
+        assert!(db
+            .get_absorption_for_note("inbox_note", "ghost")
+            .unwrap()
+            .is_none());
     }
 }

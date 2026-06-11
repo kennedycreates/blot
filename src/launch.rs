@@ -13,6 +13,9 @@ pub struct LaunchConfig {
     pub search_query: Option<String>,
     /// Create a new note in the given workspace on startup.
     pub new_workspace_note: Option<PathBuf>,
+    /// Open an external plain-text / Markdown file (`.txt`, `.md`, `.markdown`,
+    /// `.text`) directly in Editor Mode.
+    pub external_file: Option<PathBuf>,
 }
 
 impl LaunchConfig {
@@ -56,9 +59,25 @@ impl LaunchConfig {
                         i += 1;
                     }
                 }
+                "--file" => {
+                    if i + 1 < args.len() {
+                        config.external_file = Some(PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        eprintln!("blot: --file requires a file path");
+                        i += 1;
+                    }
+                }
                 arg if !arg.starts_with('-') => {
-                    // Positional arg: treat as a .water workspace path.
-                    config.workspace = Some(PathBuf::from(arg));
+                    // Positional arg: a supported plain-text / Markdown file opens
+                    // as an external file; anything else is treated as a .water
+                    // workspace path (preserving Prompt 1-10 behavior).
+                    let path = PathBuf::from(arg);
+                    if crate::external_file::is_supported(&path) {
+                        config.external_file = Some(path);
+                    } else {
+                        config.workspace = Some(path);
+                    }
                     i += 1;
                 }
                 arg => {
@@ -108,6 +127,7 @@ mod tests {
         assert!(!config.room_map);
         assert!(config.search_query.is_none());
         assert!(config.new_workspace_note.is_none());
+        assert!(config.external_file.is_none());
     }
 
     #[test]
@@ -147,5 +167,40 @@ mod tests {
     fn unknown_flags_do_not_panic() {
         let config = LaunchConfig::from_args(&args(&["--nonexistent-flag"]));
         assert!(config.workspace.is_none());
+    }
+
+    #[test]
+    fn positional_txt_becomes_external_file() {
+        let config = LaunchConfig::from_args(&args(&["/home/user/notes.txt"]));
+        assert_eq!(
+            config.external_file,
+            Some(PathBuf::from("/home/user/notes.txt"))
+        );
+        assert!(config.workspace.is_none());
+    }
+
+    #[test]
+    fn positional_md_becomes_external_file() {
+        let config = LaunchConfig::from_args(&args(&["/home/user/README.md"]));
+        assert_eq!(
+            config.external_file,
+            Some(PathBuf::from("/home/user/README.md"))
+        );
+    }
+
+    #[test]
+    fn positional_water_is_still_workspace() {
+        let config = LaunchConfig::from_args(&args(&["/home/user/Notes.water"]));
+        assert_eq!(
+            config.workspace,
+            Some(PathBuf::from("/home/user/Notes.water"))
+        );
+        assert!(config.external_file.is_none());
+    }
+
+    #[test]
+    fn parses_file_flag() {
+        let config = LaunchConfig::from_args(&args(&["--file", "/tmp/a.md"]));
+        assert_eq!(config.external_file, Some(PathBuf::from("/tmp/a.md")));
     }
 }

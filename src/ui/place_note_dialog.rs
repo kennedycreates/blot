@@ -15,6 +15,7 @@ use crate::place_note::{
     compute_suggestion, place_inbox_note, record_last_used_destination, PlaceDestination,
     PlacementRequest,
 };
+use super::modal_host::{self, ButtonKind, ModalHost};
 use crate::workspace::{ContainerKind, WorkspaceDb};
 use gtk::prelude::*;
 use std::cell::RefCell;
@@ -58,7 +59,7 @@ impl DialogState {
 /// Open the Place Note dialog.
 ///
 /// # Parameters
-/// - `parent` — the parent window (dialog is transient to this).
+/// - `host` — the in-window modal host the picker is shown on.
 /// - `inbox_note_id` — which Inbox note to place.
 /// - `inbox_note_title` — displayed at the top of the dialog.
 /// - `inbox_db` — shared access to the Inbox database.
@@ -67,7 +68,7 @@ impl DialogState {
 /// - `on_placed` — called after successful placement with the result.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     inbox_note_id: String,
     inbox_note_title: String,
     inbox_db: Rc<RefCell<Option<InboxDb>>>,
@@ -86,21 +87,20 @@ pub fn show(
     };
 
     if workspace_list.is_empty() {
-        // No workspaces known — show a simple message dialog.
-        let msg = gtk::MessageDialog::builder()
-            .transient_for(parent)
-            .modal(true)
-            .message_type(gtk::MessageType::Info)
-            .buttons(gtk::ButtonsType::Ok)
-            .text("No workspaces available.")
-            .secondary_text(
-                "Open or create a .water workspace from Desk Mode, then try Place Note again.",
-            )
-            .build();
-        msg.connect_response(|d, _| d.close());
-        msg.present();
+        host.show_error(
+            "No workspaces available",
+            "Open or create a .water workspace from Desk Mode, then try Place Note again.",
+        );
         return;
     }
+
+    // The toplevel window — used to parent the small inline name prompts, which
+    // stay as transient windows (the host shows one modal at a time, so a nested
+    // host modal would replace this picker).
+    let app_window: Option<gtk::Window> = host
+        .overlay
+        .root()
+        .and_then(|r| r.downcast::<gtk::Window>().ok());
 
     // ── Compute suggestion ────────────────────────────────────────────────────
     let suggestion = {
@@ -109,22 +109,10 @@ pub fn show(
         compute_suggestion(ws_guard.as_ref(), &kw)
     };
 
-    // ── Build the dialog window ───────────────────────────────────────────────
-    let dialog = gtk::Window::builder()
-        .transient_for(parent)
-        .modal(true)
-        .title("Place Note")
-        .default_width(520)
-        .default_height(460)
-        .resizable(false)
-        .build();
-    dialog.add_css_class("place-note-dialog");
-
+    // ── Build the dialog content (hosted as an overlay) ───────────────────────
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(24);
-    vbox.set_margin_end(24);
+    vbox.add_css_class("place-note-dialog");
+    vbox.set_size_request(460, -1);
 
     // ── Note title display ────────────────────────────────────────────────────
     let note_title_lbl = gtk::Label::new(Some(&format!("Note: \"{inbox_note_title}\"")));
@@ -249,27 +237,12 @@ pub fn show(
     error_lbl.set_visible(false);
     vbox.append(&error_lbl);
 
-    // ── Action buttons ────────────────────────────────────────────────────────
-    let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    spacer.set_vexpand(true);
-    vbox.append(&spacer);
-
-    let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    btn_row.set_halign(gtk::Align::End);
-    btn_row.set_margin_top(16);
-
-    let cancel_btn = gtk::Button::with_label("Cancel");
-    cancel_btn.add_css_class("place-note-cancel-btn");
-
-    let place_btn = gtk::Button::with_label("Place Note");
-    place_btn.add_css_class("place-note-place-btn");
-    place_btn.add_css_class("suggested-action");
-
-    btn_row.append(&cancel_btn);
-    btn_row.append(&place_btn);
-    vbox.append(&btn_row);
-
-    dialog.set_child(Some(&vbox));
+    // ── Action buttons (hosted in the modal's actions row) ────────────────────
+    let actions = modal_host::build_modal_actions();
+    let cancel_btn = modal_host::build_modal_button("Cancel", ButtonKind::Secondary, || {});
+    let place_btn = modal_host::build_modal_button("Place Note", ButtonKind::Primary, || {});
+    actions.append(&cancel_btn);
+    actions.append(&place_btn);
 
     // ── Shared state ──────────────────────────────────────────────────────────
     let state: Rc<RefCell<DialogState>> = Rc::new(RefCell::new(DialogState {
@@ -456,7 +429,7 @@ pub fn show(
 
     // ── Wire "+ New Room" ─────────────────────────────────────────────────────
     {
-        let dialog_ref = dialog.clone();
+        let win_ref = app_window.clone();
         let ws_combo = ws_combo.clone();
         let room_combo = room_combo.clone();
         let state = state.clone();
@@ -474,7 +447,8 @@ pub fn show(
                 Err(_) => return,
             };
 
-            if let Some(name) = prompt_name(&dialog_ref, "New Room", "Room name:") {
+            let Some(win) = win_ref.as_ref() else { return };
+            if let Some(name) = prompt_name(win, "New Room", "Room name:") {
                 if let Ok(room) = ws.create_room(&name) {
                     // Append to combo and select the new room.
                     room_combo.append_text(&name);
@@ -489,7 +463,7 @@ pub fn show(
 
     // ── Wire "+ New Shelf" ────────────────────────────────────────────────────
     {
-        let dialog_ref = dialog.clone();
+        let win_ref = app_window.clone();
         let ws_combo = ws_combo.clone();
         let room_combo = room_combo.clone();
         let state = state.clone();
@@ -515,7 +489,8 @@ pub fn show(
                 Ok(ws) => ws,
                 Err(_) => return,
             };
-            if let Some(name) = prompt_name(&dialog_ref, "New Shelf", "Shelf name:") {
+            let Some(win) = win_ref.as_ref() else { return };
+            if let Some(name) = prompt_name(win, "New Shelf", "Shelf name:") {
                 if let Ok(shelf) = ws.create_container(&room_id, &name, ContainerKind::Shelf) {
                     shelf_combo.append_text(&name);
                     let new_idx = {
@@ -533,7 +508,7 @@ pub fn show(
 
     // ── Wire "+ New Pile" ─────────────────────────────────────────────────────
     {
-        let dialog_ref = dialog.clone();
+        let win_ref = app_window.clone();
         let ws_combo = ws_combo.clone();
         let room_combo = room_combo.clone();
         let state = state.clone();
@@ -559,7 +534,8 @@ pub fn show(
                 Ok(ws) => ws,
                 Err(_) => return,
             };
-            if let Some(name) = prompt_name(&dialog_ref, "New Pile", "Pile name:") {
+            let Some(win) = win_ref.as_ref() else { return };
+            if let Some(name) = prompt_name(win, "New Pile", "Pile name:") {
                 if let Ok(pile) = ws.create_container(&room_id, &name, ContainerKind::Pile) {
                     pile_combo.append_text(&name);
                     let new_idx = {
@@ -577,16 +553,16 @@ pub fn show(
 
     // ── Cancel button ─────────────────────────────────────────────────────────
     {
-        let dialog_ref = dialog.clone();
+        let host_ref = host.clone();
         cancel_btn.connect_clicked(move |_| {
-            dialog_ref.close();
+            host_ref.hide();
         });
     }
 
     // ── Place Note button ─────────────────────────────────────────────────────
     let on_placed = Rc::new(on_placed);
     {
-        let dialog_ref = dialog.clone();
+        let host_ref = host.clone();
         let ws_combo = ws_combo.clone();
         let room_combo = room_combo.clone();
         let shelf_combo = shelf_combo.clone();
@@ -714,7 +690,7 @@ pub fn show(
                         workspace_name: placed.workspace_name,
                         destination_label: placed.destination_label,
                     };
-                    dialog_ref.close();
+                    host_ref.hide();
                     (on_placed)(info);
                 }
                 Err(e) => {
@@ -724,19 +700,7 @@ pub fn show(
         });
     }
 
-    // ── Keyboard shortcuts ────────────────────────────────────────────────────
-    {
-        let dialog_ref = dialog.clone();
-        let key_ctrl = gtk::EventControllerKey::new();
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape {
-                dialog_ref.close();
-                return gtk::glib::Propagation::Stop;
-            }
-            gtk::glib::Propagation::Proceed
-        });
-        dialog.add_controller(key_ctrl);
-    }
+    // Escape is handled by the modal host (scrim_dismisses).
 
     // ── Initial population ────────────────────────────────────────────────────
     // Trigger room + container load for the initially selected workspace.
@@ -777,7 +741,7 @@ pub fn show(
         suggestion_lbl.set_text(&format!("Suggested: {}", sug.workspace_name));
     }
 
-    dialog.present();
+    host.show_with_custom_ui("Place Note", &vbox, &actions, true, None);
 }
 
 // ── PlacedInfo — returned to the caller on success ────────────────────────────

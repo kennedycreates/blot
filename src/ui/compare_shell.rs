@@ -4,6 +4,7 @@
 //! — to the Inbox for Inbox notes, to the open workspace for workspace notes.
 //! Copy / Move selection buttons transfer text between panels.
 
+use super::modal_host::{self, ButtonKind, ModalHost};
 use crate::document;
 use crate::inbox::{new_note_id, now_iso8601, InboxDb, InboxNote};
 use crate::title;
@@ -441,6 +442,7 @@ pub struct CompareShell {
     right: ComparePanel,
     inbox_db: Rc<RefCell<Option<InboxDb>>>,
     workspace_db: Rc<RefCell<Option<WorkspaceDb>>>,
+    modal_host: ModalHost,
     on_exit: Rc<dyn Fn()>,
 }
 
@@ -448,6 +450,7 @@ impl CompareShell {
     pub fn new(
         inbox_db: Rc<RefCell<Option<InboxDb>>>,
         workspace_db: Rc<RefCell<Option<WorkspaceDb>>>,
+        modal_host: ModalHost,
         on_exit: impl Fn() + 'static,
     ) -> Self {
         let left = ComparePanel::new(inbox_db.clone(), workspace_db.clone(), "A");
@@ -526,6 +529,7 @@ impl CompareShell {
             right,
             inbox_db,
             workspace_db,
+            modal_host,
             on_exit: Rc::new(on_exit),
         };
 
@@ -669,46 +673,23 @@ impl CompareShell {
     }
 
     /// Open a note-picker dialog for the left panel and load the chosen note.
-    pub fn pick_left_note(&self, parent: &gtk::ApplicationWindow) {
-        self.pick_note_for(parent, Side::Left);
+    pub fn pick_left_note(&self) {
+        self.build_note_picker_dialog();
     }
 
     /// Open a note-picker dialog for the right panel and load the chosen note.
-    pub fn pick_right_note(&self, parent: &gtk::ApplicationWindow) {
-        self.pick_note_for(parent, Side::Right);
+    pub fn pick_right_note(&self) {
+        self.build_note_picker_dialog();
     }
 
-    fn pick_note_for(&self, parent: &gtk::ApplicationWindow, side: Side) {
-        let dialog = self.build_note_picker_dialog(parent);
-        let shell = self.clone();
-        dialog.choose(Some(parent), None::<&gio::Cancellable>, move |response| {
-            let _ = (response, &shell, side);
-            // The actual note loading is handled inside build_note_picker_dialog
-            // via list row activation — this outer callback handles dialog close.
-        });
-    }
-
-    /// Build a modal note-picker dialog that loads the chosen note into `side`.
-    fn build_note_picker_dialog(&self, parent: &gtk::ApplicationWindow) -> gtk::AlertDialog {
-        // We use a plain GTK window (not AlertDialog) for the list picker.
-        // AlertDialog doesn't support arbitrary content; use a custom Window instead.
-        let win = gtk::Window::builder()
-            .transient_for(parent)
-            .modal(true)
-            .title("Choose a note")
-            .default_width(440)
-            .default_height(360)
-            .resizable(true)
-            .build();
-        win.add_css_class("compare-picker-window");
-
+    /// Build a modal note-picker overlay that loads the chosen note.
+    fn build_note_picker_dialog(&self) {
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        vbox.add_css_class("compare-picker-window");
+        vbox.set_size_request(420, 360);
 
         let search = gtk::SearchEntry::new();
         search.set_placeholder_text(Some("Filter notes…"));
-        search.set_margin_top(10);
-        search.set_margin_start(10);
-        search.set_margin_end(10);
         search.set_margin_bottom(6);
 
         let scroll = gtk::ScrolledWindow::builder()
@@ -768,7 +749,6 @@ impl CompareShell {
         scroll.set_child(Some(&list));
         vbox.append(&search);
         vbox.append(&scroll);
-        win.set_child(Some(&vbox));
 
         // Filter on search.
         {
@@ -795,11 +775,10 @@ impl CompareShell {
         // Activate row → load note into the correct panel.
         {
             let shell = self.clone();
-            let win2 = win.clone();
             list.connect_row_activated(move |_, row| {
                 let key = row.widget_name().to_string();
-                shell.load_note_by_key(&key, &win2);
-                win2.close();
+                shell.load_note_by_key(&key);
+                shell.modal_host.hide();
             });
         }
 
@@ -807,40 +786,36 @@ impl CompareShell {
         {
             let list2 = list.clone();
             let shell = self.clone();
-            let win2 = win.clone();
             let key_ctrl = gtk::EventControllerKey::new();
             key_ctrl.connect_key_pressed(move |_, key, _, _| match key {
                 gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
                     if let Some(row) = list2.selected_row() {
                         let key = row.widget_name().to_string();
-                        shell.load_note_by_key(&key, &win2);
-                        win2.close();
+                        shell.load_note_by_key(&key);
+                        shell.modal_host.hide();
                     }
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::Escape => {
-                    win2.close();
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
             });
-            win.add_controller(key_ctrl);
+            search.add_controller(key_ctrl);
         }
 
-        win.present();
+        let actions = modal_host::build_modal_actions();
+        let host_close = self.modal_host.clone();
+        let cancel_btn = modal_host::build_modal_button("Cancel", ButtonKind::Secondary, move || {
+            host_close.hide()
+        });
+        actions.append(&cancel_btn);
 
-        // Return a dummy AlertDialog so the caller type-checks.
-        // The real work is done inside `win` — callers ignore the returned value.
-        gtk::AlertDialog::builder()
-            .message("Note picker")
-            .buttons(["Cancel"])
-            .cancel_button(0)
-            .build()
+        self.modal_host
+            .show_with_custom_ui("Choose a note", &vbox, &actions, true, None);
+        search.grab_focus();
     }
 
     /// Load the note identified by `key` into the LAST-focused panel.
     /// Key format: `"W:<note_id>"` for workspace, otherwise bare note_id for inbox.
-    fn load_note_by_key(&self, key: &str, _parent: &gtk::Window) {
+    fn load_note_by_key(&self, key: &str) {
         if let Some(ws_note_id) = key.strip_prefix("W:") {
             // Workspace note — load into the right panel (or left if right is occupied).
             if let Some(db) = self.workspace_db.borrow().as_ref() {
@@ -861,8 +836,8 @@ impl CompareShell {
     }
 
     /// Open the note picker for the right panel.  Call from the header "Pick B" button.
-    pub fn open_right_picker(&self, parent: &gtk::ApplicationWindow) {
-        let _ = self.build_note_picker_dialog(parent);
+    pub fn open_right_picker(&self) {
+        self.build_note_picker_dialog();
     }
 
     /// True if either panel has been loaded with a note.
@@ -871,14 +846,6 @@ impl CompareShell {
             || self.right.session.borrow().note_id.is_some()
     }
 }
-
-#[derive(Clone, Copy)]
-enum Side {
-    Left,
-    Right,
-}
-
-use gio::prelude::*;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

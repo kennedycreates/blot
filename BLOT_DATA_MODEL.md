@@ -120,8 +120,42 @@ The "Source" toggle button in the editor:
 | 2 (Prompt 3) | Added `document_json TEXT` column via `ALTER TABLE` |
 | 3 (Prompt 5) | Added `blot_pins` and `blot_recent` tables for global pin/recent tracking |
 | 4 (Prompt 7) | Added 4 placement columns: `placed_at`, `placed_workspace_path`, `placed_workspace_note_id`, `placed_destination_label` |
+| 5 (Prompt 10) | Added `inbox_note_versions` table + merge-tracking columns (`merged_into_*`, `merged_at`) |
+| 6 (Prompt 11) | Added `absorbed_files` provenance table for external `.txt`/`.md` files absorbed into Blot |
 
 All migrations run automatically on `InboxDb::open()`. Existing databases are upgraded in-place without data loss.
+
+### External Files and Absorb Provenance (Prompt 11)
+
+Blot opens `.txt` / `.md` / `.markdown` / `.text` files as a distinct **External
+File** note kind — not an Inbox note and not a workspace note. External files
+live only in memory + on disk; they are persisted with **manual save** (no disk
+autosave) and do not enter the Inbox or the search index until absorbed.
+
+"Absorbing" creates a real Blot note (Inbox or workspace) from the file content,
+generating `document_json`, an auto-bookmark version (`reason = "absorb_file"`,
+`bookmark_name = "Absorbed from file"`), and a provenance row.
+
+#### `absorbed_files` (Inbox DB)
+
+Records every absorb regardless of destination, so duplicate detection works
+across the Inbox and all workspaces.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | TEXT | Primary key. |
+| `target_kind` | TEXT | `inbox_note` or `workspace_note`. |
+| `target_id` | TEXT | Note ID in the respective store. |
+| `workspace_path` | TEXT | Empty for inbox notes; `.water` path otherwise. |
+| `source_file_path` | TEXT | Absolute path of the original file (indexed). |
+| `source_file_original_name` | TEXT | File name with extension. |
+| `source_file_original_modified_at` | TEXT | Source file mtime at absorb (ISO-8601), nullable. |
+| `source_file_absorbed_at` | TEXT | When the absorb happened (ISO-8601). |
+| `original_action` | TEXT | `left` or `trashed`. |
+
+Duplicate detection queries `source_file_path`; a prior match shows a warning
+but never silently merges or overwrites. Originals are never permanently
+deleted — "Move to Trash" uses GIO/GVfs trash only, on explicit user action.
 | `word_count` | INTEGER | Approximate word count for display. |
 
 ### `inbox_blocks`

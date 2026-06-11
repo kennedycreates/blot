@@ -8,6 +8,7 @@
 //! do not have `blot_rooms` / `blot_room_connections` tables and show an info
 //! state instead.
 
+use super::modal_host::{self, ButtonKind, ModalHost};
 use crate::workspace::{Room, RoomConnection, WorkspaceDb};
 use cairo::Context as CairoCtx;
 use gtk::prelude::*;
@@ -127,12 +128,14 @@ pub struct RoomMapShell {
     is_map_view: Rc<Cell<bool>>,
     map_btn: gtk::ToggleButton,
     list_btn: gtk::ToggleButton,
+    modal_host: ModalHost,
     on_open_room: Rc<dyn Fn(String)>,
 }
 
 impl RoomMapShell {
     pub fn new(
         workspace_db: Rc<RefCell<Option<WorkspaceDb>>>,
+        modal_host: ModalHost,
         on_open_room: impl Fn(String) + 'static,
     ) -> Self {
         let map_state: Rc<RefCell<MapState>> = Rc::new(RefCell::new(MapState::default()));
@@ -287,6 +290,7 @@ impl RoomMapShell {
             is_map_view: is_map_view.clone(),
             map_btn: map_btn.clone(),
             list_btn: list_btn.clone(),
+            modal_host,
             on_open_room,
         };
 
@@ -326,16 +330,16 @@ impl RoomMapShell {
         // ── Add Room button ───────────────────────────────────────────────────
         {
             let shell2 = shell.clone();
-            add_room_btn.connect_clicked(move |btn| {
-                shell2.prompt_create_room(btn.upcast_ref());
+            add_room_btn.connect_clicked(move |_| {
+                shell2.prompt_create_room();
             });
         }
 
         // ── Connect button ────────────────────────────────────────────────────
         {
             let shell2 = shell.clone();
-            connect_btn.connect_clicked(move |btn| {
-                shell2.show_connect_dialog(btn.upcast_ref());
+            connect_btn.connect_clicked(move |_| {
+                shell2.show_connect_dialog();
             });
         }
 
@@ -710,8 +714,8 @@ impl RoomMapShell {
         add_conn_btn.set_tooltip_text(Some("Add a Door from this Room to another"));
         {
             let shell2 = self.clone();
-            add_conn_btn.connect_clicked(move |btn| {
-                shell2.show_connect_dialog(btn.upcast_ref());
+            add_conn_btn.connect_clicked(move |_| {
+                shell2.show_connect_dialog();
             });
         }
 
@@ -754,8 +758,8 @@ impl RoomMapShell {
             let shell2 = self.clone();
             let conn_id = conn.id.clone();
             let curr_type = conn.connection_type.clone();
-            change_btn.connect_clicked(move |btn| {
-                shell2.show_change_type_dialog(btn.upcast_ref(), &conn_id, &curr_type);
+            change_btn.connect_clicked(move |_| {
+                shell2.show_change_type_dialog(&conn_id, &curr_type);
             });
         }
 
@@ -784,97 +788,26 @@ impl RoomMapShell {
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
 
-    fn prompt_create_room(&self, anchor: &gtk::Widget) {
-        let window = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-
-        let dialog = gtk::Window::builder()
-            .title("Create Room")
-            .default_width(340)
-            .resizable(false)
-            .modal(true)
-            .build();
-        if let Some(ref w) = window {
-            dialog.set_transient_for(Some(w));
-        }
-        dialog.add_css_class("blot-dialog");
-
-        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        vbox.set_margin_top(18);
-        vbox.set_margin_bottom(18);
-        vbox.set_margin_start(18);
-        vbox.set_margin_end(18);
-
-        let lbl = gtk::Label::new(Some("Room name:"));
-        lbl.set_halign(gtk::Align::Start);
-
-        let entry = gtk::Entry::new();
-        entry.set_placeholder_text(Some("New Room"));
-        entry.set_activates_default(true);
-
-        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        btn_box.set_halign(gtk::Align::End);
-
-        let cancel_btn = gtk::Button::with_label("Cancel");
-        let create_btn = gtk::Button::with_label("Create");
-        create_btn.add_css_class("suggested-action");
-
-        btn_box.append(&cancel_btn);
-        btn_box.append(&create_btn);
-
-        vbox.append(&lbl);
-        vbox.append(&entry);
-        vbox.append(&btn_box);
-        dialog.set_child(Some(&vbox));
-
-        let dialog_cancel = dialog.clone();
-        cancel_btn.connect_clicked(move |_| dialog_cancel.close());
-
-        let shell2 = self.clone();
-        let dialog_create = dialog.clone();
-        let entry2 = entry.clone();
-        create_btn.connect_clicked(move |_| {
-            let name = entry2.text().trim().to_string();
-            if !name.is_empty() {
-                let db_guard = shell2.workspace_db.borrow();
+    fn prompt_create_room(&self) {
+        let shell = self.clone();
+        self.modal_host
+            .show_input("Create Room", "Room name:", "", "Create", move |name| {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let db_guard = shell.workspace_db.borrow();
                 if let Some(db) = db_guard.as_ref() {
                     if let Err(e) = db.create_room(&name) {
                         eprintln!("blot: create room failed: {e}");
                     }
                 }
                 drop(db_guard);
-                shell2.refresh();
-            }
-            dialog_create.close();
-        });
-
-        // Enter in entry triggers create
-        let shell3 = self.clone();
-        let dialog_entry = dialog.clone();
-        let entry3 = entry.clone();
-        entry.connect_activate(move |_| {
-            let name = entry3.text().trim().to_string();
-            if !name.is_empty() {
-                let db_guard = shell3.workspace_db.borrow();
-                if let Some(db) = db_guard.as_ref() {
-                    let _ = db.create_room(&name);
-                }
-                drop(db_guard);
-                shell3.refresh();
-            }
-            dialog_entry.close();
-        });
-
-        let entry_focus = entry.clone();
-        dialog.connect_map(move |_| {
-            entry_focus.grab_focus();
-        });
-
-        dialog.present();
+                shell.refresh();
+            });
     }
 
-    fn show_connect_dialog(&self, anchor: &gtk::Widget) {
-        let window = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-
+    fn show_connect_dialog(&self) {
         let rooms: Vec<(String, String)> = {
             let state = self.map_state.borrow();
             state
@@ -885,34 +818,16 @@ impl RoomMapShell {
         };
 
         if rooms.len() < 2 {
-            let info = gtk::AlertDialog::builder()
-                .message("Need at least 2 rooms")
-                .detail("Create more Rooms before adding a Door between them.")
-                .buttons(["OK"])
-                .default_button(0)
-                .cancel_button(0)
-                .modal(true)
-                .build();
-            info.choose(window.as_ref(), None::<&gio::Cancellable>, |_| {});
+            self.modal_host.show_error(
+                "Need at least 2 rooms",
+                "Create more Rooms before adding a Door between them.",
+            );
             return;
         }
 
-        let dialog = gtk::Window::builder()
-            .title("Add Door (Connect Rooms)")
-            .default_width(360)
-            .resizable(false)
-            .modal(true)
-            .build();
-        if let Some(ref w) = window {
-            dialog.set_transient_for(Some(w));
-        }
-        dialog.add_css_class("blot-dialog");
-
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        vbox.set_margin_top(18);
-        vbox.set_margin_bottom(18);
-        vbox.set_margin_start(18);
-        vbox.set_margin_end(18);
+        vbox.add_css_class("blot-dialog");
+        vbox.set_size_request(340, -1);
 
         // Pre-select from currently-selected room if any.
         let presel_index: Option<usize> = {
@@ -956,28 +871,21 @@ impl RoomMapShell {
         error_lbl.set_halign(gtk::Align::Start);
         error_lbl.set_visible(false);
 
-        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        btn_box.set_halign(gtk::Align::End);
-
-        let cancel_btn = gtk::Button::with_label("Cancel");
-        let add_btn = gtk::Button::with_label("Add Door");
-        add_btn.add_css_class("suggested-action");
-
-        btn_box.append(&cancel_btn);
-        btn_box.append(&add_btn);
-
         vbox.append(&row_a);
         vbox.append(&row_b);
         vbox.append(&type_box);
         vbox.append(&error_lbl);
-        vbox.append(&btn_box);
-        dialog.set_child(Some(&vbox));
 
-        let dialog_cancel = dialog.clone();
-        cancel_btn.connect_clicked(move |_| dialog_cancel.close());
+        let actions = modal_host::build_modal_actions();
+        let cancel_btn = modal_host::build_modal_button("Cancel", ButtonKind::Secondary, {
+            let host = self.modal_host.clone();
+            move || host.hide()
+        });
+        let add_btn = modal_host::build_modal_button("Add Door", ButtonKind::Primary, || {});
+        actions.append(&cancel_btn);
+        actions.append(&add_btn);
 
         let shell2 = self.clone();
-        let dialog_add = dialog.clone();
         let rooms2 = rooms.clone();
         let combo_a2 = combo_a.clone();
         let combo_b2 = combo_b.clone();
@@ -1015,31 +923,17 @@ impl RoomMapShell {
             }
             drop(db_guard);
             shell2.refresh();
-            dialog_add.close();
+            shell2.modal_host.hide();
         });
 
-        dialog.present();
+        self.modal_host
+            .show_with_custom_ui("Add Door (Connect Rooms)", &vbox, &actions, true, None);
     }
 
-    fn show_change_type_dialog(&self, anchor: &gtk::Widget, conn_id: &str, current_type: &str) {
-        let window = anchor.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-
-        let dialog = gtk::Window::builder()
-            .title("Change Connection Type")
-            .default_width(300)
-            .resizable(false)
-            .modal(true)
-            .build();
-        if let Some(ref w) = window {
-            dialog.set_transient_for(Some(w));
-        }
-        dialog.add_css_class("blot-dialog");
-
+    fn show_change_type_dialog(&self, conn_id: &str, current_type: &str) {
         let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        vbox.set_margin_top(18);
-        vbox.set_margin_bottom(18);
-        vbox.set_margin_start(18);
-        vbox.set_margin_end(18);
+        vbox.add_css_class("blot-dialog");
+        vbox.set_size_request(280, -1);
 
         let lbl = gtk::Label::new(Some("Connection type:"));
         lbl.set_halign(gtk::Align::Start);
@@ -1052,28 +946,17 @@ impl RoomMapShell {
         };
         type_dropdown.set_selected(presel);
 
-        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        btn_box.set_halign(gtk::Align::End);
-
-        let cancel_btn = gtk::Button::with_label("Cancel");
-        let save_btn = gtk::Button::with_label("Save");
-        save_btn.add_css_class("suggested-action");
-
-        btn_box.append(&cancel_btn);
-        btn_box.append(&save_btn);
-
         vbox.append(&lbl);
         vbox.append(&type_dropdown);
-        vbox.append(&btn_box);
-        dialog.set_child(Some(&vbox));
 
-        let dialog_cancel = dialog.clone();
-        cancel_btn.connect_clicked(move |_| dialog_cancel.close());
-
+        let actions = modal_host::build_modal_actions();
+        let cancel_btn = modal_host::build_modal_button("Cancel", ButtonKind::Secondary, {
+            let host = self.modal_host.clone();
+            move || host.hide()
+        });
         let shell2 = self.clone();
         let conn_id = conn_id.to_string();
-        let dialog_save = dialog.clone();
-        save_btn.connect_clicked(move |_| {
+        let save_btn = modal_host::build_modal_button("Save", ButtonKind::Primary, move || {
             let new_type = match type_dropdown.selected() {
                 1 => "strong",
                 2 => "weak",
@@ -1085,15 +968,18 @@ impl RoomMapShell {
             }
             drop(db_guard);
             shell2.refresh();
-            dialog_save.close();
+            shell2.modal_host.hide();
         });
+        actions.append(&cancel_btn);
+        actions.append(&save_btn);
 
-        dialog.present();
+        self.modal_host
+            .show_with_custom_ui("Change Connection Type", &vbox, &actions, true, None);
     }
 
     /// Show the connect dialog pre-selected to the currently selected room.
-    pub fn show_connect_rooms_dialog(&self, anchor: &gtk::Widget) {
-        self.show_connect_dialog(anchor);
+    pub fn show_connect_rooms_dialog(&self) {
+        self.show_connect_dialog();
     }
 }
 

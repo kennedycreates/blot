@@ -97,7 +97,7 @@ impl EditorWidgets {
         s.auto_titled = note.auto_titled;
         s.dirty = false;
 
-        self.save_label.set_text("Opened");
+        super::set_save_status(&self.save_label, "Opened");
         self.place_btn.set_sensitive(true);
         self.split_btn.set_sensitive(true);
         self.bookmark_btn.set_sensitive(true);
@@ -126,7 +126,7 @@ impl EditorWidgets {
         }
 
         session.borrow_mut().reset();
-        self.save_label.set_text("New note");
+        super::set_save_status(&self.save_label, "New note");
         self.place_btn.set_sensitive(false);
         self.split_btn.set_sensitive(false);
         self.bookmark_btn.set_sensitive(false);
@@ -400,11 +400,11 @@ pub fn build(
 
             if in_source {
                 btn.set_label("← Editor");
-                save_label.set_text("Source view");
+                super::set_save_status(&save_label, "Source view");
             } else {
                 btn.set_label("Source");
                 // Mark content dirty so autosave syncs the normalised version.
-                save_label.set_text("Unsaved");
+                super::set_save_status(&save_label, "Unsaved");
             }
         });
     }
@@ -427,7 +427,7 @@ pub fn build(
             }
             hint_label.set_visible(buf.char_count() == 0);
             session.borrow_mut().dirty = true;
-            save_label.set_text("Unsaved");
+            super::set_save_status(&save_label, "Unsaved");
 
             if let Some(id) = pending_timer.borrow_mut().take() {
                 id.remove();
@@ -495,7 +495,7 @@ fn perform_save(
             pending_timer.borrow_mut().take();
             return;
         }
-        save_label.set_text("Blank");
+        super::set_save_status(save_label, "Blank");
         pending_timer.borrow_mut().take();
         return;
     }
@@ -572,14 +572,14 @@ fn perform_save(
             s.auto_titled = is_auto;
             s.dirty = false;
             pending_timer.borrow_mut().take();
-            save_label.set_text("Saved");
+            super::set_save_status(save_label, "Saved");
         }
         Some(Err(e)) => {
             eprintln!("blot: autosave error: {e}");
-            save_label.set_text("Save error");
+            super::set_save_status(save_label, "Save error");
         }
         None => {
-            save_label.set_text("DB unavailable");
+            super::set_save_status(save_label, "DB unavailable");
         }
     }
 }

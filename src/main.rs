@@ -1,6 +1,8 @@
+mod absorb;
 mod app;
 mod config;
 mod document;
+mod external_file;
 mod inbox;
 mod known_workspaces;
 mod launch;

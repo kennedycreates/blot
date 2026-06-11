@@ -468,8 +468,15 @@ impl SearchShell {
         };
         self.status_label.set_text(&count_label);
 
-        for result in results {
-            let row = self.build_result_row(&result);
+        for (i, result) in results.iter().enumerate() {
+            let row = self.build_result_row(result);
+            // Cascade the first several rows in for a gentle "beat" as results
+            // land, instead of snapping in all at once. Later rows appear plain
+            // (and are likely off-screen anyway).
+            row.add_css_class("blot-card-anim");
+            if i < 8 {
+                row.add_css_class(&format!("blot-delay-{i}"));
+            }
             self.results_list.append(&row);
         }
 

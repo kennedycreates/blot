@@ -5,6 +5,7 @@ use crate::inbox::{format_date_short, InboxDb, InboxNote};
 use crate::note_version::NoteVersion;
 use crate::ops;
 use crate::workspace::{WorkspaceDb, WorkspaceNote};
+use super::modal_host::{self, ButtonKind, ModalHost};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,7 +21,7 @@ pub enum VersionSource {
 
 /// Open the version history dialog for an Inbox note.
 pub fn open_inbox(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     db: Rc<RefCell<Option<InboxDb>>>,
     note_id: &str,
     on_restored: impl Fn(InboxNote) + 'static,
@@ -42,7 +43,7 @@ pub fn open_inbox(
     };
 
     open_dialog(
-        parent,
+        host,
         &note.title,
         versions,
         VersionSource::Inbox,
@@ -66,7 +67,7 @@ pub fn open_inbox(
 
 /// Open the version history dialog for a workspace note.
 pub fn open_workspace(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     db: Rc<RefCell<Option<WorkspaceDb>>>,
     note_id: &str,
     on_restored: impl Fn(WorkspaceNote) + 'static,
@@ -88,7 +89,7 @@ pub fn open_workspace(
     };
 
     open_dialog(
-        parent,
+        host,
         &note.title,
         versions,
         VersionSource::Workspace,
@@ -113,76 +114,43 @@ pub fn open_workspace(
 // ── Bookmark name dialog ──────────────────────────────────────────────────────
 
 /// Show a dialog asking for a bookmark name and call `on_confirmed(name)`.
-pub fn prompt_bookmark_name(
-    parent: &gtk::ApplicationWindow,
-    on_confirmed: impl Fn(String) + 'static,
-) {
+pub fn prompt_bookmark_name(host: &ModalHost, on_confirmed: impl Fn(String) + 'static) {
     let on_confirmed = std::rc::Rc::new(on_confirmed);
-    let dialog = gtk::Window::builder()
-        .transient_for(parent)
-        .modal(true)
-        .title("Bookmark Version")
-        .default_width(360)
-        .resizable(false)
-        .build();
 
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(20);
-    vbox.set_margin_end(20);
-
-    let label = gtk::Label::new(Some("Bookmark name:"));
-    label.set_halign(gtk::Align::Start);
+    // Custom content (not show_input) because a blank name is allowed here —
+    // it resolves to a timestamped default via `default_bookmark_name`.
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.add_css_class("modal-input-content");
+    content.append(&modal_host::build_modal_prompt("Bookmark name:"));
 
     let entry = gtk::Entry::new();
+    entry.add_css_class("dialog-entry");
     entry.set_placeholder_text(Some("e.g. Before major edit"));
+    entry.set_hexpand(true);
+    content.append(&entry);
 
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    buttons.set_halign(gtk::Align::End);
+    let actions = modal_host::build_modal_actions();
 
-    let cancel_btn = gtk::Button::with_label("Cancel");
-    let save_btn = gtk::Button::with_label("Bookmark");
-    save_btn.add_css_class("suggested-action");
+    let host_c = host.clone();
+    let cancel_btn =
+        modal_host::build_modal_button("Cancel", ButtonKind::Secondary, move || host_c.hide());
+    actions.append(&cancel_btn);
 
-    buttons.append(&cancel_btn);
-    buttons.append(&save_btn);
-
-    vbox.append(&label);
-    vbox.append(&entry);
-    vbox.append(&buttons);
-    dialog.set_child(Some(&vbox));
-
-    let dialog_c = dialog.clone();
-    cancel_btn.connect_clicked(move |_| dialog_c.close());
-
-    let dialog_s = dialog.clone();
+    let host_s = host.clone();
     let entry_s = entry.clone();
     let on_confirmed_s = on_confirmed.clone();
-    save_btn.connect_clicked(move |_| {
+    let save_btn = modal_host::build_modal_button("Bookmark", ButtonKind::Primary, move || {
         let name = default_bookmark_name(&entry_s.text());
         on_confirmed_s(name);
-        dialog_s.close();
+        host_s.hide();
     });
+    actions.append(&save_btn);
 
-    // Enter key in entry → save
-    let dialog_e = dialog.clone();
-    let entry_e = entry.clone();
-    let on_confirmed_e = on_confirmed.clone();
-    let key_ctrl = gtk::EventControllerKey::new();
-    key_ctrl.connect_key_pressed(move |_, key, _, _| {
-        if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter) {
-            let name = default_bookmark_name(&entry_e.text());
-            on_confirmed_e(name.clone());
-            dialog_e.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    entry.add_controller(key_ctrl);
+    // Enter key in entry → activate Bookmark
+    let save_for_key = save_btn.clone();
+    entry.connect_activate(move |_| save_for_key.emit_clicked());
 
-    dialog.present();
+    host.show_with_custom_ui("Bookmark Version", &content, &actions, true, None);
     entry.grab_focus();
 }
 
@@ -201,24 +169,19 @@ fn default_bookmark_name(raw: &str) -> String {
 // ── Internal dialog builder ───────────────────────────────────────────────────
 
 fn open_dialog(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     note_title: &str,
     versions: Vec<NoteVersion>,
     _source: VersionSource,
     on_restore: impl Fn(String) + 'static,
 ) {
-    let dialog = gtk::Window::builder()
-        .transient_for(parent)
-        .modal(true)
-        .title(&format!("Version History — {note_title}"))
-        .default_width(700)
-        .default_height(480)
-        .resizable(true)
-        .build();
-    dialog.add_css_class("version-history-window");
+    let title = format!("Version History — {note_title}");
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.add_css_class("version-history-window");
     paned.set_position(260);
+    // The host panel sizes to content, so give the panes explicit dimensions.
+    paned.set_size_request(720, 460);
 
     // Left: list of versions
     let list_scroll = gtk::ScrolledWindow::builder()
@@ -300,31 +263,20 @@ fn open_dialog(
     preview_view.set_bottom_margin(12);
     preview_scroll.set_child(Some(&preview_view));
 
-    // Bottom buttons
-    let btn_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    btn_bar.set_halign(gtk::Align::End);
-    btn_bar.set_margin_top(8);
-    btn_bar.set_margin_bottom(12);
-    btn_bar.set_margin_end(12);
-
-    let copy_btn = gtk::Button::with_label("Copy Body");
-    let restore_btn = gtk::Button::with_label("Restore");
-    restore_btn.add_css_class("suggested-action");
-    restore_btn.set_sensitive(false);
-
-    btn_bar.append(&copy_btn);
-    btn_bar.append(&restore_btn);
-
-    let right_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    right_box.append(&preview_scroll);
-    right_box.append(&btn_bar);
-
     paned.set_start_child(Some(&list_scroll));
-    paned.set_end_child(Some(&right_box));
+    paned.set_end_child(Some(&preview_scroll));
 
-    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    outer.append(&paned);
-    dialog.set_child(Some(&outer));
+    // Actions row (hosted by the modal): Copy / Restore / Close.
+    let actions = modal_host::build_modal_actions();
+    let copy_btn = modal_host::build_modal_button("Copy Body", ButtonKind::Secondary, || {});
+    let restore_btn = modal_host::build_modal_button("Restore", ButtonKind::Primary, || {});
+    restore_btn.set_sensitive(false);
+    let host_close = host.clone();
+    let close_btn =
+        modal_host::build_modal_button("Close", ButtonKind::Secondary, move || host_close.hide());
+    actions.append(&close_btn);
+    actions.append(&copy_btn);
+    actions.append(&restore_btn);
 
     // Populate preview on row selection
     let versions_rc: Rc<Vec<NoteVersion>> = Rc::new(versions);
@@ -361,7 +313,7 @@ fn open_dialog(
     // Restore
     let versions_for_restore = versions_rc.clone();
     let list_for_restore = list.clone();
-    let dialog_for_restore = dialog.clone();
+    let host_for_restore = host.clone();
     restore_btn.connect_clicked(move |_| {
         let Some(row) = list_for_restore.selected_row() else {
             return;
@@ -369,7 +321,7 @@ fn open_dialog(
         let vid = row.widget_name().to_string();
         if versions_for_restore.iter().any(|v| v.id == vid) {
             on_restore(vid);
-            dialog_for_restore.close();
+            host_for_restore.hide();
         }
     });
 
@@ -378,5 +330,5 @@ fn open_dialog(
         list.select_row(Some(&first));
     }
 
-    dialog.present();
+    host.show_with_custom_ui(&title, &paned, &actions, true, None);
 }

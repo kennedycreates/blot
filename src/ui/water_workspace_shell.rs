@@ -264,7 +264,7 @@ impl WaterWorkspaceShell {
                 self.save_button.set_sensitive(false);
                 self.message_label
                     .set_text(&format!("Saved. Backup: {}", backup.display()));
-                self.status_save_label.set_text("Saved");
+                super::set_save_status(&self.status_save_label, "Saved");
             }
             Err(error) => {
                 self.set_save_error(&error.to_string());
@@ -302,8 +302,10 @@ impl WaterWorkspaceShell {
         buffer.set_text(note_body(note).unwrap_or(""));
         self.message_label
             .set_text("Editing direct .water note body.");
-        self.status_save_label
-            .set_text(if state.dirty { "Unsaved" } else { "Opened" });
+        super::set_save_status(
+            &self.status_save_label,
+            if state.dirty { "Unsaved" } else { "Opened" },
+        );
         self.save_button.set_sensitive(state.dirty);
         *self.loading.borrow_mut() = false;
     }
@@ -359,7 +361,7 @@ impl WaterWorkspaceShell {
             state.dirty = true;
             self.save_button.set_sensitive(true);
             self.message_label.set_text("Unsaved changes.");
-            self.status_save_label.set_text("Unsaved");
+            super::set_save_status(&self.status_save_label, "Unsaved");
         }
     }
 
@@ -376,7 +378,7 @@ impl WaterWorkspaceShell {
 
     fn set_save_error(&self, message: &str) {
         self.message_label.set_text(message);
-        self.status_save_label.set_text("Save error");
+        super::set_save_status(&self.status_save_label, "Save error");
         self.save_button.set_sensitive(true);
         eprintln!("blot: .water save error: {message}");
     }

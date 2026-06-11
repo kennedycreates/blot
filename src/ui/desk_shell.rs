@@ -411,9 +411,14 @@ impl DeskShell {
         self.inbox_count_label
             .set_text(&format!("Inbox ({})", notes.len()));
 
-        for note in &notes {
+        for (i, note) in notes.iter().enumerate() {
             let row = gtk::ListBoxRow::new();
             row.add_css_class("desk-note-row");
+            // Gentle cascade as the inbox column populates.
+            row.add_css_class("blot-row-anim");
+            if i < 8 {
+                row.add_css_class(&format!("blot-delay-{i}"));
+            }
             row.set_widget_name(&note.id);
 
             let row_box = gtk::Box::new(gtk::Orientation::Vertical, 2);

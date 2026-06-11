@@ -1,3 +1,4 @@
+use super::modal_host::{self, ButtonKind, ModalHost};
 use gtk::prelude::*;
 
 /// All commands available in the command palette.
@@ -52,48 +53,38 @@ pub const COMMANDS: &[&str] = &[
     "Export All Notes",
 ];
 
-/// Open the command palette as a modal window centered over `parent`.
+/// Open the command palette as an in-window modal overlay on `host`.
 /// `status_label` is updated with the last selected command name.
 /// `on_place_note` is called when the user activates "Place Note".
 /// `on_room_map_cmd` is called with the command name for Room Map commands.
 /// `on_general_cmd` is called for all other wired commands (tabs, windows,
 /// compare mode, etc.).
 pub fn open(
-    parent: &gtk::ApplicationWindow,
+    host: &ModalHost,
     status_label: &gtk::Label,
     on_place_note: Option<std::rc::Rc<dyn Fn()>>,
     on_room_map_cmd: Option<std::rc::Rc<dyn Fn(&str)>>,
     on_general_cmd: Option<std::rc::Rc<dyn Fn(&str)>>,
 ) {
-    let dialog = gtk::Window::builder()
-        .transient_for(parent)
-        .modal(true)
-        .title("Commands")
-        .default_width(540)
-        .default_height(420)
-        .resizable(false)
-        .build();
-    dialog.add_css_class("command-palette-window");
-
-    // Root layout
+    // Content layout (search + list); the host supplies the panel chrome.
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.add_css_class("command-palette-window");
 
     // Search entry
     let search = gtk::SearchEntry::new();
     search.set_placeholder_text(Some("Type a command…"));
     search.add_css_class("command-palette-search");
-    search.set_margin_top(10);
     search.set_margin_bottom(10);
-    search.set_margin_start(12);
-    search.set_margin_end(12);
 
     let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
 
-    // Scrollable command list
+    // Scrollable command list — fixed size since the panel sizes to content.
     let scrolled = gtk::ScrolledWindow::builder()
-        .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(360)
+        .min_content_width(500)
         .build();
+    scrolled.set_margin_top(8);
 
     let list = gtk::ListBox::new();
     list.add_css_class("command-palette-list");
@@ -119,7 +110,6 @@ pub fn open(
     vbox.append(&search);
     vbox.append(&sep);
     vbox.append(&scrolled);
-    dialog.set_child(Some(&vbox));
 
     // --- Filter as you type ---
     let list_clone = list.clone();
@@ -154,7 +144,7 @@ pub fn open(
     });
 
     // --- Activate on row click or Enter ---
-    let dialog_for_list = dialog.clone();
+    let host_for_list = host.clone();
     let status_for_list = status_label.clone();
     let place_for_list = on_place_note.clone();
     let room_map_for_list = on_room_map_cmd.clone();
@@ -167,23 +157,19 @@ pub fn open(
             room_map_for_list.as_deref(),
             general_for_list.as_deref(),
         );
-        dialog_for_list.close();
+        host_for_list.hide();
     });
 
     // --- Keyboard handling inside the search entry ---
-    // Enter activates the selected row; Escape closes without action.
+    // Enter activates the selected row; Escape is handled by the modal host.
     let key_ctrl = gtk::EventControllerKey::new();
     let list_for_key = list.clone();
-    let dialog_for_key = dialog.clone();
+    let host_for_key = host.clone();
     let status_for_key = status_label.clone();
     let place_for_key = on_place_note.clone();
     let room_map_for_key = on_room_map_cmd.clone();
     let general_for_key = on_general_cmd.clone();
     key_ctrl.connect_key_pressed(move |_, key, _, _| match key {
-        gtk::gdk::Key::Escape => {
-            dialog_for_key.close();
-            glib::Propagation::Stop
-        }
         gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
             if let Some(row) = list_for_key.selected_row() {
                 activate_command(
@@ -193,26 +179,30 @@ pub fn open(
                     room_map_for_key.as_deref(),
                     general_for_key.as_deref(),
                 );
-                dialog_for_key.close();
+                host_for_key.hide();
             }
             glib::Propagation::Stop
         }
         _ => glib::Propagation::Proceed,
     });
-    dialog.add_controller(key_ctrl);
-
-    // --- Focus the search entry on open ---
-    let search_ref = search.clone();
-    dialog.connect_map(move |_| {
-        search_ref.grab_focus();
-    });
+    search.add_controller(key_ctrl);
 
     // --- Select the first row by default ---
     if let Some(first) = list.row_at_index(0) {
         list.select_row(Some(&first));
     }
 
-    dialog.present();
+    // Single Close action fills the host's actions row.
+    let actions = modal_host::build_modal_actions();
+    let host_for_close = host.clone();
+    let close_btn =
+        modal_host::build_modal_button("Close", ButtonKind::Secondary, move || {
+            host_for_close.hide()
+        });
+    actions.append(&close_btn);
+
+    host.show_with_custom_ui("Commands", &vbox, &actions, true, None);
+    search.grab_focus();
 }
 
 const ROOM_MAP_COMMANDS: &[&str] = &[
@@ -237,6 +227,7 @@ const GENERAL_COMMANDS: &[&str] = &[
     "Merge Notes",
     "Bookmark Version",
     "Show Version History",
+    "Absorb File",
 ];
 
 fn activate_command(

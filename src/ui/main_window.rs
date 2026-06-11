@@ -5,13 +5,15 @@ use crate::launch::LaunchConfig;
 use crate::paths::AppPaths;
 use crate::ui::compare_shell::CompareShell;
 use crate::ui::desk_shell::DeskShell;
+use crate::ui::external_file_shell::ExternalFileShell;
 use crate::ui::room_map_shell::RoomMapShell;
 use crate::ui::search_shell::{SearchNoteTarget, SearchShell};
 use crate::ui::tab_bar::{NoteSource, TabBar, TabModel};
 use crate::ui::water_workspace_shell::WaterWorkspaceShell;
 use crate::ui::workspace_shell::WorkspaceShell;
 use crate::ui::{
-    command_palette, editor_shell, merge_dialog, place_note_dialog, version_history_shell,
+    absorb_dialog, command_palette, editor_shell, external_file_shell, merge_dialog, modal_host,
+    place_note_dialog, version_history_shell,
 };
 use crate::workspace::{now_iso8601, WorkspaceDb, WorkspaceNoteSession};
 use gio::prelude::*;
@@ -37,6 +39,12 @@ impl MainWindow {
             .default_height(740)
             .build();
         window.add_css_class("blot-window");
+
+        // ── In-window modal host (one per window) ──────────────────────────
+        // All in-app dialogs are shown as overlays on this host instead of
+        // separate toplevel windows. Cloned (Rc-backed) into the closures that
+        // open dialogs below.
+        let modal_host = modal_host::ModalHost::new();
 
         // ── Shared inbox state ─────────────────────────────────────────────
         let session: Rc<RefCell<NoteSession>> = Rc::new(RefCell::new(NoteSession::default()));
@@ -120,6 +128,13 @@ impl MainWindow {
             location_label.clone(),
         );
         let water_shell = WaterWorkspaceShell::new(save_label.clone(), location_label.clone());
+
+        // ── External file shell (.txt / .md / .markdown) ───────────────────
+        let external_shell = external_file_shell::build(
+            save_label.clone(),
+            location_label.clone(),
+            modal_host.clone(),
+        );
 
         // ── Mode stack ─────────────────────────────────────────────────────
         let stack = gtk::Stack::new();
@@ -326,7 +341,7 @@ impl MainWindow {
             let ws_shell_nav = ws_shell.clone();
             let stack_nav = stack.clone();
             let mode_nav = mode_label.clone();
-            RoomMapShell::new(workspace_db.clone(), move |room_id| {
+            RoomMapShell::new(workspace_db.clone(), modal_host.clone(), move |room_id| {
                 ws_shell_nav.navigate_to_room(&room_id);
                 stack_nav.set_visible_child_name("workspace");
                 mode_nav.set_text("Workspace");
@@ -337,7 +352,7 @@ impl MainWindow {
         let compare_shell = {
             let stack_exit = stack.clone();
             let mode_exit = mode_label.clone();
-            CompareShell::new(db.clone(), workspace_db.clone(), move || {
+            CompareShell::new(db.clone(), workspace_db.clone(), modal_host.clone(), move || {
                 stack_exit.set_visible_child_name("editor");
                 mode_exit.set_text("Editor");
             })
@@ -350,11 +365,12 @@ impl MainWindow {
         stack.add_named(&search_shell.root, Some("search"));
         stack.add_named(&room_map_shell.root, Some("room-map"));
         stack.add_named(&compare_shell.root, Some("compare"));
+        stack.add_named(&external_shell.root, Some("external"));
 
         // ── Place Note shared callback ──────────────────────────────────────
         // Installed here (after window/stack/ws_shell/editor are all live).
         {
-            let window_ref = window.clone();
+            let host_ref = modal_host.clone();
             let db_ref = db.clone();
             let workspace_db_ref = workspace_db.clone();
             let known_ws_ref = known_ws.clone();
@@ -379,7 +395,7 @@ impl MainWindow {
                     let session2 = session_ref.clone();
 
                     place_note_dialog::show(
-                        &window_ref,
+                        &host_ref,
                         note_id,
                         note_title,
                         db_ref.clone(),
@@ -405,6 +421,61 @@ impl MainWindow {
                         },
                     );
                 }));
+        }
+
+        // ── Absorb-into-Blot callback ───────────────────────────────────────
+        {
+            let host_ref = modal_host.clone();
+            let db_ref = db.clone();
+            let workspace_db_ref = workspace_db.clone();
+            let editor_ref = editor.clone();
+            let session_ref = session.clone();
+            let ws_shell_ref = ws_shell.clone();
+            let stack_ref = stack.clone();
+            let mode_ref = mode_label.clone();
+            let save_ref = save_label.clone();
+            let location_ref = location_label.clone();
+
+            *external_shell.on_absorb.borrow_mut() = Some(Box::new(
+                move |ef: crate::external_file::ExternalFile, title: String| {
+                    let db2 = db_ref.clone();
+                    let editor2 = editor_ref.clone();
+                    let session2 = session_ref.clone();
+                    let ws_shell2 = ws_shell_ref.clone();
+                    let stack2 = stack_ref.clone();
+                    let mode2 = mode_ref.clone();
+                    let save2 = save_ref.clone();
+                    let location2 = location_ref.clone();
+
+                    absorb_dialog::show(
+                        &host_ref,
+                        ef,
+                        title,
+                        db_ref.clone(),
+                        workspace_db_ref.clone(),
+                        move |result| {
+                            save2.set_text(&format!("Absorbed into {}", result.destination_label));
+                            if result.target_kind == "inbox_note" {
+                                let note_opt = db2
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|d| d.get_note(&result.target_id).ok().flatten());
+                                if let Some(note) = note_opt {
+                                    editor2.load_note(&note, &session2);
+                                }
+                                location2.set_text("Inbox");
+                                stack2.set_visible_child_name("editor");
+                                mode2.set_text("Editor");
+                            } else {
+                                ws_shell2.refresh();
+                                ws_shell2.open_note(&result.target_id);
+                                stack2.set_visible_child_name("workspace");
+                                mode2.set_text("Workspace");
+                            }
+                        },
+                    );
+                },
+            ));
         }
 
         // ── Tab bar ────────────────────────────────────────────────────────
@@ -537,7 +608,7 @@ impl MainWindow {
             let db2 = db.clone();
             let editor2 = editor.clone();
             let session2 = session.clone();
-            let window2 = window.clone();
+            let host2 = modal_host.clone();
             *editor.on_split.borrow_mut() = Some(Box::new(move |note_id: String| {
                 // Get selected text from the editor body view.
                 let buf = editor2.body_view.buffer();
@@ -547,7 +618,10 @@ impl MainWindow {
                     String::new()
                 };
                 if selected.trim().is_empty() {
-                    eprintln!("blot: Split Note — select text first");
+                    host2.show_error(
+                        "Split Note",
+                        "Select some text in the note first, then split it into a new note.",
+                    );
                     return;
                 }
                 let note_opt = db2
@@ -581,9 +655,11 @@ impl MainWindow {
                                 "blot: Split Note → new note '{}' created",
                                 result.new_note.title
                             );
-                            let _ = &window2;
                         }
-                        Err(e) => eprintln!("blot: split error: {e}"),
+                        Err(e) => {
+                            eprintln!("blot: split error: {e}");
+                            host2.show_error("Split Note", &format!("Could not split note: {e}"));
+                        }
                     }
                 }
             }));
@@ -592,7 +668,7 @@ impl MainWindow {
         // Bookmark Version
         {
             let db2 = db.clone();
-            let window2 = window.clone();
+            let host2 = modal_host.clone();
             *editor.on_bookmark.borrow_mut() = Some(Box::new(move |note_id: String| {
                 let db3 = db2.clone();
                 let note_opt = db3
@@ -600,7 +676,7 @@ impl MainWindow {
                     .as_ref()
                     .and_then(|d| d.get_note(&note_id).ok().flatten());
                 let Some(note) = note_opt else { return };
-                version_history_shell::prompt_bookmark_name(&window2, move |name| {
+                version_history_shell::prompt_bookmark_name(&host2, move |name| {
                     if let Some(d) = db3.borrow().as_ref() {
                         match d.create_version(
                             &note,
@@ -623,13 +699,13 @@ impl MainWindow {
             let db2 = db.clone();
             let editor2 = editor.clone();
             let session2 = session.clone();
-            let window2 = window.clone();
+            let host2 = modal_host.clone();
             *editor.on_history.borrow_mut() = Some(Box::new(move |note_id: String| {
                 let db3 = db2.clone();
                 let editor3 = editor2.clone();
                 let session3 = session2.clone();
                 version_history_shell::open_inbox(
-                    &window2,
+                    &host2,
                     db3.clone(),
                     &note_id,
                     move |restored| {
@@ -645,13 +721,13 @@ impl MainWindow {
             let db2 = db.clone();
             let editor2 = editor.clone();
             let session2 = session.clone();
-            let window2 = window.clone();
+            let host2 = modal_host.clone();
             *editor.on_merge.borrow_mut() = Some(Box::new(move |note_id: String| {
                 let db3 = db2.clone();
                 let editor3 = editor2.clone();
                 let session3 = session2.clone();
                 let target_id = note_id.clone();
-                merge_dialog::open_inbox(&window2, db3.clone(), &note_id, move |source_ids| {
+                merge_dialog::open_inbox(&host2, db3.clone(), &note_id, move |source_ids| {
                     let target_opt = db3
                         .borrow()
                         .as_ref()
@@ -736,7 +812,10 @@ impl MainWindow {
         root.append(&tab_bar_widget.root);
         root.append(&stack);
         root.append(&status_bar);
-        window.set_child(Some(&root));
+        // The modal host's overlay wraps the whole UI; `root` is its main child
+        // and any dialog appears as a centered overlay above it.
+        modal_host.overlay.set_child(Some(&root));
+        window.set_child(Some(&modal_host.overlay));
 
         // ── Mode button connections ─────────────────────────────────────────
 
@@ -835,7 +914,7 @@ impl MainWindow {
 
         // ── Command palette ────────────────────────────────────────────────
         {
-            let window_ref = window.clone();
+            let host_ref = modal_host.clone();
             let save_ref = save_label.clone();
             let deferred_place_palette = deferred_place.clone();
             let editor_palette = editor.clone();
@@ -852,6 +931,7 @@ impl MainWindow {
             let gen_tab_model = tab_model.clone();
             let gen_tab_bar = tab_bar_widget.clone();
             let gen_compare = compare_shell.clone();
+            let gen_external = external_shell.clone();
             let gen_app = app.clone();
             let gen_config = config.clone();
             let gen_paths = paths.clone();
@@ -880,12 +960,13 @@ impl MainWindow {
                     &gen_tab_model,
                     &gen_tab_bar,
                     &gen_compare,
+                    &gen_external,
                     &gen_app,
                     &gen_config,
                     &gen_paths,
                 );
                 command_palette::open(
-                    &window_ref,
+                    &host_ref,
                     &save_ref,
                     on_place,
                     Some(on_room_map),
@@ -898,7 +979,7 @@ impl MainWindow {
 
         // Ctrl+Shift+P → command palette
         {
-            let w = window.clone();
+            let host_action = modal_host.clone();
             let lbl = save_label.clone();
             let deferred_place_action = deferred_place.clone();
             let editor_action = editor.clone();
@@ -915,6 +996,7 @@ impl MainWindow {
             let gen_tab_model = tab_model.clone();
             let gen_tab_bar = tab_bar_widget.clone();
             let gen_compare = compare_shell.clone();
+            let gen_external = external_shell.clone();
             let gen_app = app.clone();
             let gen_config = config.clone();
             let gen_paths = paths.clone();
@@ -944,11 +1026,18 @@ impl MainWindow {
                     &gen_tab_model,
                     &gen_tab_bar,
                     &gen_compare,
+                    &gen_external,
                     &gen_app,
                     &gen_config,
                     &gen_paths,
                 );
-                command_palette::open(&w, &lbl, on_place, Some(on_room_map), Some(on_general));
+                command_palette::open(
+                    &host_action,
+                    &lbl,
+                    on_place,
+                    Some(on_room_map),
+                    Some(on_general),
+                );
             });
             window.add_action(&action);
             app.set_accels_for_action("win.open-command-palette", &["<Ctrl><Shift>p"]);
@@ -1120,6 +1209,9 @@ impl MainWindow {
         }
 
         // ── Save on close ──────────────────────────────────────────────────
+        // Inbox/workspace notes autosave silently. External files use manual
+        // save, so unsaved external edits must NOT be lost silently: prompt to
+        // Save / Discard / Cancel before closing.
         {
             let editor = editor.clone();
             let session = session.clone();
@@ -1127,11 +1219,46 @@ impl MainWindow {
             let ws_shell2 = ws_shell.clone();
             let water_shell2 = water_shell.clone();
             let compare_shell2 = compare_shell.clone();
+            let external_shell2 = external_shell.clone();
+            let window_close = window.clone();
+            let force_close = std::rc::Rc::new(std::cell::Cell::new(false));
             window.connect_close_request(move |_| {
                 editor.force_save_sync(&db, &session);
                 ws_shell2.force_save_sync();
                 water_shell2.force_save_sync();
                 compare_shell2.force_save_both();
+
+                if external_shell2.has_unsaved_changes() && !force_close.get() {
+                    let shell = external_shell2.clone();
+                    let fc = force_close.clone();
+                    let win = window_close.clone();
+                    let dialog = gtk::AlertDialog::builder()
+                        .message("Unsaved changes to file")
+                        .detail(
+                            "This external file has unsaved edits. Save them back to \
+                             the file before closing?",
+                        )
+                        .buttons(["Cancel", "Discard", "Save"])
+                        .default_button(2)
+                        .cancel_button(0)
+                        .modal(true)
+                        .build();
+                    dialog.choose(Some(&window_close), None::<&gio::Cancellable>, move |res| {
+                        match res {
+                            Ok(2) => {
+                                shell.save_sync();
+                                fc.set(true);
+                                win.close();
+                            }
+                            Ok(1) => {
+                                fc.set(true);
+                                win.close();
+                            }
+                            _ => { /* Cancel: stay open */ }
+                        }
+                    });
+                    return glib::Propagation::Stop;
+                }
                 glib::Propagation::Proceed
             });
         }
@@ -1148,6 +1275,7 @@ impl MainWindow {
             &known_ws,
             &paths.known_workspaces,
             &search_shell,
+            &external_shell,
         );
 
         window
@@ -1423,6 +1551,7 @@ fn make_general_cmd_handler(
     tab_model: &Rc<RefCell<TabModel>>,
     tab_bar: &crate::ui::tab_bar::TabBar,
     compare: &CompareShell,
+    external_shell: &ExternalFileShell,
     app: &Application,
     config: &Rc<AppConfig>,
     paths: &Rc<AppPaths>,
@@ -1436,6 +1565,7 @@ fn make_general_cmd_handler(
     let tm = tab_model.clone();
     let tb = tab_bar.clone();
     let cmp = compare.clone();
+    let ext = external_shell.clone();
     let app = app.clone();
     let cfg = config.clone();
     let pth = paths.clone();
@@ -1541,6 +1671,13 @@ fn make_general_cmd_handler(
                 }
             }
         }
+        "Absorb File" => {
+            if ext.current.borrow().is_some() {
+                ext.trigger_absorb();
+            } else {
+                eprintln!("blot: Absorb File — open a .txt/.md file first");
+            }
+        }
         other => {
             eprintln!("blot: general command '{other}' not handled");
         }
@@ -1560,7 +1697,24 @@ fn apply_launch_config(
     known_ws: &Rc<RefCell<KnownWorkspaceRegistry>>,
     _known_ws_file: &std::path::Path,
     search_shell: &SearchShell,
+    external_shell: &ExternalFileShell,
 ) {
+    // External plain-text / Markdown file takes precedence: open it directly.
+    if let Some(path) = launch.external_file.as_ref() {
+        match external_shell.open_path(path) {
+            Ok(()) => {
+                stack.set_visible_child_name("external");
+                mode_label.set_text("Editor");
+                location_label.set_text("External File");
+            }
+            Err(e) => {
+                eprintln!("blot: could not open file {}: {e}", path.display());
+                show_error_dialog(None::<&gtk::Window>, "Could not open file", &e);
+            }
+        }
+        return;
+    }
+
     if launch.room_map {
         stack.set_visible_child_name("room-map");
         mode_label.set_text("Room Map");
